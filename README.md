@@ -47,6 +47,10 @@ it's just 1 token, **quota consumption is negligible**.
 
 ## Dashboard
 
+<p align="center">
+  <img src="images/claude-usage.png" width="400" alt="Claude Usage dashboard on Kindle">
+</p>
+
 The fullscreen dashboard (grayscale — Kindle e-ink has no color) shows:
 
 - **Two usage cards** — session (5h) and weekly (7d), each with a large percentage, a
@@ -85,9 +89,18 @@ koreader/plugins/claudeusage.koplugin/
 
 Restart KOReader.
 
+<p align="center">
+  <img src="images/claude-usage-no-menu-do-koreader.png" width="400" alt="Claude Usage in KOReader tools menu">
+</p>
+
 ### 3. Login via QR code
 
 1. On the Kindle: **Menu → Claude Usage → Login (web)**.
+
+<p align="center">
+  <img src="images/claude-usage-no-menu-do-koreader2.png" width="400" alt="Claude Usage sub-menu options">
+</p>
+
 2. A modal shows a **QR code**, the URL `http://<ip>:8099/?k=<PIN>`, and the PIN.
 3. **Scan the QR** with a phone on the **same WiFi** — the form opens with the PIN pre-filled.
 4. Paste the `sk-ant-oat01-…` token and submit.
@@ -128,7 +141,7 @@ claudeusage.koplugin/
   _meta.lua          Plugin manifest (name, fullname, description)
   main.lua           WidgetContainer subclass — plumbing, fetch, menu, PIN prompt, token lifecycle
   usagescreen.lua    Fullscreen dashboard — cards, mascot, auto-refresh, gestures, rotation
-  clawd.lua          Clawd mascot as Lua pixel-art (26×18 grid, procedural geometry)
+  clawd.lua          Clawd mascot as Lua pixel-art (28×24 grid, procedural geometry)
   crypto.lua         Token encryption at rest (ChaCha20 + iterated SHA-256 KDF)
   sha256.lua         SHA-256 implementation for LuaJIT (self-tested vs FIPS vectors)
   chacha20.lua       ChaCha20 stream cipher for LuaJIT (self-tested vs RFC 8439 vectors)

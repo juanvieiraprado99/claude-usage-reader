@@ -81,6 +81,8 @@ function UsageScreen:init()
     self.close_btn = nil
     self.interval_btn = nil
     self.rotate_btn = nil
+    self._mascot_ref = nil
+    self._mascot_bbox = nil
 
     self.ges_events = { Tap = { GestureRange:new{ ges = "tap", range = self.dimen } } }
 
@@ -169,6 +171,47 @@ local function expand(geom, m)
                      w = geom.w + 2 * m, h = geom.h + 2 * m }
 end
 
+function UsageScreen:mascotBBox()
+    if self._mascot_bbox then return self._mascot_bbox end
+    local w = self._mascot_ref
+    if not w or not w.dimen then return nil end
+    -- Walk up the parent chain to get absolute screen coordinates.
+    local x, y = w.dimen.x, w.dimen.y
+    local p = w.parent
+    while p do
+        if p.dimen then
+            x = x + (p.dimen.x or 0)
+            y = y + (p.dimen.y or 0)
+        end
+        p = p.parent
+    end
+    self._mascot_bbox = Geom:new{ x = x, y = y, w = w.dimen.w, h = w.dimen.h }
+    return self._mascot_bbox
+end
+
+function UsageScreen:triggerShy()
+    if self.cur_anim then return end   -- don't interrupt a running animation
+    self.cur_anim = "shy"
+    self.cur_phase = 0
+    local spec = Clawd.ANIMS.shy
+    local i = 0
+    local function step()
+        if self.closed then return end
+        i = i + 1
+        if i > spec.frames then
+            self.cur_anim, self.cur_phase, self.cur_bob = nil, 0, 0
+            self:rebuild()
+            self:scheduleNextAnim()
+            return
+        end
+        self.cur_phase = i
+        self.cur_bob = (i % 2 == 0) and sb(3) or 0
+        self:rebuild()
+        UIManager:scheduleIn(spec.step, step)
+    end
+    step()
+end
+
 function UsageScreen:onTap(a, b)
     local ges = b or a
     local pos = ges and ges.pos
@@ -181,6 +224,11 @@ function UsageScreen:onTap(a, b)
     end
     if self.interval_btn and inside(expand(self.interval_btn.dimen, m), pos) then
         self:cycleInterval(); return true
+    end
+    -- Tap on the mascot -> shy animation
+    local bbox = self:mascotBBox()
+    if bbox and inside(expand(bbox, m), pos) then
+        self:triggerShy(); return true
     end
     return true
 end
@@ -262,6 +310,7 @@ function UsageScreen:mascotHolder()
     local emotion = Clawd.emotionFor(self:maxPct(), status)
     local mascot = self:mkClawd(emotion, self.mascot_scale,
                                 { anim = self.cur_anim, phase = self.cur_phase })
+    self._mascot_ref = mascot
     return VerticalGroup:new{
         align = "center",
         VerticalSpan:new{ width = self.cur_bob or 0 },
@@ -325,6 +374,7 @@ function UsageScreen:rebuild()
         if w.free then w:free() end
     end
     self._disposables = {}
+    self._mascot_bbox = nil   -- mascot widget changes each rebuild
 
     -- Live dimensions (orientation may have changed).
     self.width, self.height = Screen:getWidth(), Screen:getHeight()
