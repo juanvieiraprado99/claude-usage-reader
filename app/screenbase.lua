@@ -197,7 +197,8 @@ end
 -- "updated 14:03" on the left, the auto-refresh and close pills on the right.
 function ScreenBase:buildHeader(updated)
     local lw = self.width - 2 * sb(Theme.MARGIN)
-    local left = TextWidget:new{ text = updated, face = face(14), fgcolor = C.muted }
+    local left = TextWidget:new{ text = updated, face = face(14), bold = true,
+                                 fgcolor = C.muted }
     local secs = self.plugin.refresh_interval
     local itxt = (secs == 0) and T("AUTO OFF") or string.format(T("AUTO %ds"), secs)
     self.refresh_btn = ScreenBase.pill(itxt, C.white)

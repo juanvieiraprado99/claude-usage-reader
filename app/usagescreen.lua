@@ -175,7 +175,7 @@ function UsageScreen:makeCard(title, frac, epoch, card_w)
         },
         VerticalSpan:new{ width = sb(12) },
         TextWidget:new{ text = T("RESETS IN - ") .. Fmt.resetDate(epoch),
-                        face = face(12), fgcolor = C.muted },
+                        face = face(12), bold = true, fgcolor = C.muted },
         VerticalSpan:new{ width = sb(2) },
         TextWidget:new{ text = Fmt.resetIn(epoch), face = face(28), bold = true },
     }
@@ -220,7 +220,7 @@ function UsageScreen:buildDataColumn()
                         face = face(15), bold = true },
         VerticalSpan:new{ width = sb(6) },
         TextWidget:new{ text = string.format(T("PEAK USE: %d%%"), math.floor(self:maxPct())),
-                        face = face(13), fgcolor = C.muted },
+                        face = face(13), bold = true, fgcolor = C.muted },
     }
 end
 
