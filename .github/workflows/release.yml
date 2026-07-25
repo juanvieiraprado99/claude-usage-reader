@@ -85,7 +85,9 @@ jobs:
       - name: Build ${{ matrix.platform }}
         run: |
           ./packaging/fetch-runtime.sh "$(cat packaging/KOREADER_VERSION)" "${{ matrix.platform }}"
-          APP_VERSION="$(cat VERSION).${{ github.run_number }}" ./packaging/build.sh
+          # No APP_VERSION here on purpose: build.sh reads VERSION itself, so the
+          # file stays the single source and CI cannot drift from a local build.
+          ./packaging/build.sh
 
       # Guards against a silently mismatched runtime: a package whose luajit
       # wants an interpreter the target device lacks fails with a bare
@@ -124,8 +126,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          VERSION="$(cat VERSION).${{ github.run_number }}"
+          VERSION="$(cat VERSION)"
           KOVER="$(cat packaging/KOREADER_VERSION)"
+
+          # The version is now the VERSION file rather than the run number, so a
+          # push that does not bump it would try to recreate an existing tag.
+          # Skip instead of failing: build and smoke already ran, and that is the
+          # part that gates the push. Releases happen when VERSION changes.
+          if gh release view "v${VERSION}" >/dev/null 2>&1; then
+            echo "::notice::v${VERSION} already released - bump VERSION to publish a new one"
+            exit 0
+          fi
+
           ls -lh artifacts
           cat >notes.md <<EOF
           Claude Code rate-limit usage on a jailbroken Kindle.
