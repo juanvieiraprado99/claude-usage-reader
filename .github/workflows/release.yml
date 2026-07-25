@@ -49,7 +49,7 @@ jobs:
           done < packaging/prune.txt
           echo "runtime ${before}M -> $(du -sm "$EMU" | cut -f1)M"
 
-      - name: Boot the app
+      - name: Run the smoke test
         run: |
           # The runtime ships its own libSDL3, so no system SDL is needed.
           export LD_LIBRARY_PATH="$EMU/libs:$EMU:${LD_LIBRARY_PATH:-}"
@@ -59,16 +59,16 @@ jobs:
           export SDL_VIDEODRIVER=dummy
           export EMULATE_READER_W=758 EMULATE_READER_H=1024 EMULATE_READER_DPI=212
           mkdir -p "$CLAUDEUSAGE_DATA"
-          ( cd "$EMU" && timeout 25 ./luajit "$GITHUB_WORKSPACE/app/app.lua" ) >smoke.log 2>&1 || true
-          tail -40 smoke.log
-          if grep -qE "stack traceback|claudeusage crashed" smoke.log; then
-              echo "::error::the app crashed during startup"
+          status=0
+          ( cd "$EMU" && timeout 60 ./luajit "$GITHUB_WORKSPACE/packaging/smoke.lua" ) \
+            >smoke.log 2>&1 || status=$?
+          grep -vE "^ffi\.(load|findlib)" smoke.log | tail -60
+          if [ "$status" -ne 0 ]; then
+              echo "::error::smoke test failed (exit $status)"
               exit 1
           fi
-          # A silent runtime is also wrong: the device line proves it got far
-          # enough to initialise the screen.
-          grep -q "initializing for device" smoke.log || {
-              echo "::error::the app never reached device initialisation"
+          grep -q "SMOKE OK" smoke.log || {
+              echo "::error::smoke test did not run to completion"
               exit 1
           }
 

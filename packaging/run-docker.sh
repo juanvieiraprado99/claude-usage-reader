@@ -6,9 +6,10 @@
 #   ./packaging/run-docker.sh            # full runtime
 #   ./packaging/run-docker.sh --pruned   # after applying prune.txt (what ships)
 #
-# It boots app/app.lua exactly like the Kindle launcher does, using the Linux
-# x86_64 KOReader build, with SDL on the dummy video driver. Boot-order bugs and
-# missing requires surface here.
+# It runs packaging/smoke.lua - which boots exactly like app/app.lua and then
+# drives all three pages and a rotation cycle - against the Linux x86_64
+# KOReader build, with SDL on the dummy video driver. Boot-order bugs, missing
+# requires and module name collisions surface here.
 #
 # LIMITATION: the container has system libraries of its own, so a .so pruned
 # from libs/ can still resolve from /usr/lib and the run passes where the Kindle
@@ -64,7 +65,7 @@ export EMULATE_READER_H=1024
 export EMULATE_READER_DPI=212
 
 cd "$EMU"
-timeout 25 ./luajit /app/app.lua 2>&1 | grep -vE "^ffi\.(load|findlib)" | tail -40
+timeout 60 ./luajit /pkg/smoke.lua 2>&1 | grep -vE "^ffi\.(load|findlib)" | tail -40
 INNER
 
 echo "==> running smoke test (pruned=$PRUNED)"

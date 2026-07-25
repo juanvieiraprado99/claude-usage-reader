@@ -40,6 +40,10 @@ cp -r "$RUNTIME" "$STAGE/runtime"
 rm -f "$STAGE/runtime/.platform" "$STAGE/runtime/.koversion"
 chmod +x "$STAGE/bin/claudeusage.sh"
 
+# Bake the version into the package so the app can show it on screen; the copy
+# in the repo stays "dev".
+printf 'return "%s"\n' "$APP_VERSION" >"$STAGE/app/appversion.lua"
+
 echo "==> pruning runtime"
 before="$(du -sm "$STAGE/runtime" | cut -f1)"
 while IFS= read -r line; do

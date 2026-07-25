@@ -110,10 +110,12 @@ import from `koreader/settings/` for users of the old plugin.
   `fbink` (also copied to `/var/tmp`), and both stdout and stderr go to
   `crash.log`. A pre-flight check compares the ELF interpreter `luajit` needs
   against the device, because a wrong-platform build only says "not found".
-- `.github/workflows/release.yml` — the `smoke` job is the real gate: it boots
-  `app/app.lua` against the **linux x86_64** KOReader build of the same pinned
-  version, with `prune.txt` applied and `SDL_VIDEODRIVER=dummy`, and fails on a
-  traceback or on never reaching device init. The `build` job additionally
+- `.github/workflows/release.yml` — the `smoke` job is the real gate: it runs
+  `packaging/smoke.lua` against the **linux x86_64** KOReader build of the same
+  pinned version, with `prune.txt` applied and `SDL_VIDEODRIVER=dummy`. Booting
+  alone proves little — with no token the app stops at the login modal — so the
+  smoke script also opens all three pages, repaints each and cycles rotation.
+  The `build` job additionally
   asserts each package's `luajit` asks for the right ELF interpreter
   (`ld-linux.so.3` vs `ld-linux-armhf.so.3`).
 - `packaging/` — `fetch-runtime.sh` (download release; writes `runtime/.platform`
@@ -158,6 +160,10 @@ import from `koreader/settings/` for users of the old plugin.
   `pill()`, `rotPill()`, `makeNav()`, `makeBottomBar()`, `onTap`/`onSwipe` and
   `_screenFrame()` are near-identical copies in all three files — a change to
   one usually has to be made three times.
+- `app/appversion.lua` — returns the version string shown in the bottom-right of
+  every screen. `packaging/build.sh` overwrites it in the staged package with
+  `APP_VERSION`; the copy in the repo stays `"dev"`. **Not** named `version.lua`:
+  KOReader ships its own `version` module and wins the `require` cache.
 - `app/roticon.lua` — the rotate button's circular arrow, drawn into a
   Blitbuffer. Deliberately NOT `IconWidget`: rendering KOReader's SVG icons goes
   through `ImageWidget:_loadfile` → `document/documentregistry`, which registers

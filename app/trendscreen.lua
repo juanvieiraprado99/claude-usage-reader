@@ -18,6 +18,7 @@ local HorizontalSpan = require("ui/widget/horizontalspan")
 local TextWidget = require("ui/widget/textwidget")
 local LineWidget = require("ui/widget/linewidget")
 local RotIcon = require("roticon")
+local Version = require("appversion")
 local GestureRange = require("ui/gesturerange")
 local Blitbuffer = require("ffi/blitbuffer")
 local Geom = require("ui/geometry")
@@ -246,21 +247,25 @@ function TrendScreen:makeNav(active)
     return grp
 end
 
--- Bottom bar: rotate button on the left, centered navigation. An empty span
--- mirrors the button on the right so the nav stays visually centered.
+-- Bottom bar: rotate button on the left, version on the right, page navigation
+-- centered. The two spans are computed separately so the nav sits in the middle
+-- of the bar regardless of how wide the version label happens to be.
 function TrendScreen:makeBottomBar(active)
     local nav = self:makeNav(active)
     self.rot_btn = rotPill()
-    local bw = self.rot_btn:getSize().w
+    local ver = TextWidget:new{ text = "v" .. Version, face = face(12),
+                                fgcolor = Blitbuffer.Color8(0x99) }
     local lw = self.width - 2 * sb(16)
-    local sp = math.max(sb(8), math.floor((lw - 2 * bw - nav:getSize().w) / 2))
+    local half = (lw - nav:getSize().w) / 2
+    local sp_l = math.max(sb(8), math.floor(half - self.rot_btn:getSize().w))
+    local sp_r = math.max(sb(8), math.floor(half - ver:getSize().w))
     return HorizontalGroup:new{
         align = "center",
         self.rot_btn,
-        HorizontalSpan:new{ width = sp },
+        HorizontalSpan:new{ width = sp_l },
         nav,
-        HorizontalSpan:new{ width = sp },
-        HorizontalSpan:new{ width = bw },
+        HorizontalSpan:new{ width = sp_r },
+        ver,
     }
 end
 
