@@ -1,20 +1,27 @@
 --[[
 Clawd — the Claude Code mascot, recreated as pixel-art in Lua.
 
-Shape follows the reference sticker: a wide, solid rounded-square body with
-a flat top, small side "ear" nubs in the upper third, two big square eyes,
-and FOUR legs (2 pairs with gaps between them). The body is built
-procedurally; features are stamped on top. Grayscale only (Kindle e-ink is
-16-level gray): terracotta -> mid gray, and the white sticker outline -> a
-dark 1px outline (white outline vanishes on the white page).
+Shape follows the front-facing reference: a single flat-topped rectangular
+head+body block, two small square eyes set high and widely spaced, two short
+ARMS protruding from the sides at mid-upper height (ending above the body's
+bottom), and FOUR short legs on the base separated by three white gaps.
+In the "heart" animation the heart floats above-left of the head.
+
+Grayscale only (Kindle e-ink): terracotta -> mid gray; the sticker's white
+outline becomes a dark 1px outline (white would vanish on the white page).
+The outline is computed automatically: any filled cell with an empty 4-neighbor
+becomes outline, which handles the stepped silhouette for free.
+
+Rendering paints horizontal RUNS of same-colored cells (one paintRect per run,
+not per cell) — much cheaper on the Kindle, especially during animations.
 
 Resting faces (emotion, basis = max(5h,7d) + status):
     love/neutral  square eyes    strain  ">" "<"    dizzy  spiral
 Animations (opts.anim, opts.phase) overlay on the resting face:
     blink   eyes -> line
     shy     ">" "<" + blush cheeks  (also triggered by tapping the mascot)
-    heart   a heart rises above the head
-    sparkle an arm + a twinkling burst off the right side
+    heart   a heart rises above-left of the head
+    sparkle a twinkling burst above the right arm
 ]]--
 
 local Blitbuffer = require("ffi/blitbuffer")
@@ -33,73 +40,75 @@ local PALETTE = {
     ["n"] = Blitbuffer.Color8(0x00),      -- sparkle dark
 }
 
-local W, H = 28, 24
--- Body geometry (0-based). Rows 3..16 = body; ears on rows 6..9.
-local TOP, BOTTOM = 3, 16
-local BL, BR = 3, 24          -- body left/right outline columns
-local L, R = 9, 18            -- left/right eye centre columns
+local W, H = 30, 24
+-- Rows 0..3 are headroom for overlays (rising heart). Body geometry (0-based):
+local L, R = 9, 20            -- left/right eye centre columns (set high, wide apart)
 
--- Build the base body as a fresh 0-indexed grid[r][c] of palette chars.
+-- Silhouette rectangles: { c1, c2, r1, r2 } (inclusive). Symmetric front view.
+local SHAPE = {
+    { 6, 23,  4, 17 },   -- head+body (single flat-topped block)
+    { 1,  5, 10, 13 },   -- left arm (ends above the body bottom)
+    { 24, 28, 10, 13 },  -- right arm
+    { 6,  8, 18, 23 },   -- leg 1 (four short legs, three gaps)
+    { 11, 13, 18, 23 },  -- leg 2
+    { 16, 18, 18, 23 },  -- leg 3
+    { 21, 23, 18, 23 },  -- leg 4
+}
+
+-- Build the base grid: fill the silhouette mask, then derive outline/highlight.
 local function makeBase()
+    -- Boolean mask
+    local m = {}
+    for r = 0, H - 1 do m[r] = {} end
+    for _, s in ipairs(SHAPE) do
+        for r = s[3], s[4] do
+            for c = s[1], s[2] do m[r][c] = true end
+        end
+    end
+    -- Char grid: outline where a filled cell touches an empty 4-neighbor/edge.
     local g = {}
     for r = 0, H - 1 do
         g[r] = {}
-        for c = 0, W - 1 do g[r][c] = "." end
-    end
-    local function set(r, c, ch)
-        if r >= 0 and r < H and c >= 0 and c < W then g[r][c] = ch end
-    end
-    local function fill(r, c1, c2, ch) for c = c1, c2 do set(r, c, ch) end end
-
-    -- Head top (outline)
-    fill(TOP, BL, BR, "o")
-    -- Head highlight row
-    set(TOP + 1, BL, "o"); fill(TOP + 1, BL + 1, BR - 1, "l"); set(TOP + 1, BR, "o")
-    -- Body fill rows
-    for r = TOP + 2, BOTTOM do
-        set(r, BL, "o"); fill(r, BL + 1, BR - 1, "b"); set(r, BR, "o")
-    end
-    -- Side ear nubs (protrude 2px on each side)
-    for r = 6, 9 do
-        set(r, BL - 2, "o"); set(r, BL - 1, "o")
-        set(r, BL, "b")
-        set(r, BR, "b")
-        set(r, BR + 1, "o"); set(r, BR + 2, "o")
-    end
-    -- Central notch at body bottom (gap between inner legs)
-    set(BOTTOM, 12, "."); set(BOTTOM, 13, ".")
-    -- FOUR legs: outer-left, inner-left, inner-right, outer-right
-    local legs = { {5, 7}, {9, 11}, {16, 18}, {20, 22} }
-    for _, lg in ipairs(legs) do
-        for r = BOTTOM + 1, H - 2 do
-            fill(r, lg[1], lg[2], "b")
-            set(r, lg[1], "o"); set(r, lg[2], "o")
+        for c = 0, W - 1 do
+            if not m[r][c] then
+                g[r][c] = "."
+            else
+                local up    = r > 0     and m[r - 1][c]
+                local down  = r < H - 1 and m[r + 1][c]
+                local left  = c > 0     and m[r][c - 1]
+                local right = c < W - 1 and m[r][c + 1]
+                if not (up and down and left and right) then
+                    g[r][c] = "o"
+                elseif r == 5 then
+                    g[r][c] = "l"          -- highlight line under the head top
+                else
+                    g[r][c] = "b"
+                end
+            end
         end
-        fill(H - 1, lg[1], lg[2], "o")   -- foot bottom
     end
     return g
 end
 
 -- Face pixel lists (0-based) --------------------------------------------------
 local function squareEye(cc)
-    return { {5,cc-1},{5,cc},{5,cc+1}, {6,cc-1},{6,cc},{6,cc+1}, {7,cc-1},{7,cc},{7,cc+1} }
+    return { {6,cc-1},{6,cc},{6,cc+1}, {7,cc-1},{7,cc},{7,cc+1}, {8,cc-1},{8,cc},{8,cc+1} }
 end
 local function chevron(cc, dir)   -- ">" if dir>0, "<" if dir<0
-    if dir > 0 then return { {5,cc-1},{6,cc+1},{7,cc-1} }
-    else return { {5,cc+1},{6,cc-1},{7,cc+1} } end
+    if dir > 0 then return { {6,cc-1},{7,cc+1},{8,cc-1} }
+    else return { {6,cc+1},{7,cc-1},{8,cc+1} } end
 end
 local function spiralEye(cc)
-    -- 5x5 box outline + center dot (matches original dizzy reference)
+    -- 5x5 box outline + center dot (dizzy)
     return {
         {5,cc-2},{5,cc-1},{5,cc},{5,cc+1},{5,cc+2},
         {6,cc-2},{6,cc+2},
         {7,cc-2},{7,cc},{7,cc+2},
         {8,cc-2},{8,cc+2},
         {9,cc-2},{9,cc-1},{9,cc},{9,cc+1},{9,cc+2},
-        {7,cc},
     }
 end
-local function lineEye(cc) return { {6,cc-1},{6,cc},{6,cc+1} } end
+local function lineEye(cc) return { {7,cc-1},{7,cc},{7,cc+1} } end
 
 local function concat(a, b) for _, p in ipairs(b) do a[#a+1] = p end return a end
 
@@ -111,11 +120,12 @@ end
 
 -- Decoration overlays ({r,c,char}) -------------------------------------------
 local function blushOverlay()
-    return { {9,L-2,"l"},{9,L-1,"l"}, {9,R+1,"l"},{9,R+2,"l"} }
+    return { {10,L-2,"l"},{10,L-1,"l"}, {10,R+1,"l"},{10,R+2,"l"} }
 end
 local function heartOverlay(phase)
-    local top = 1 - math.min(phase or 0, 3)     -- rises as phase grows
-    local c = 4
+    -- Floats above-LEFT of the head (as on the sticker); rises with phase.
+    local top = 2 - math.min(phase or 0, 3)
+    local c = 2
     local rel = {
         {0,1},{0,2},{0,4},{0,5},
         {1,0},{1,1},{1,2},{1,3},{1,4},{1,5},{1,6},
@@ -129,12 +139,10 @@ local function heartOverlay(phase)
     return out
 end
 local function sparkleOverlay(phase)
-    local out = { {10,24,"o"},{10,25,"o"},{10,26,"o"} }
-    local setA = { {7,26,"n"},{6,27,"l"},{9,27,"n"},{11,26,"l"},{8,27,"n"},{10,27,"l"} }
-    local setB = { {6,26,"l"},{7,27,"n"},{8,27,"l"},{10,27,"n"},{12,26,"n"},{9,27,"l"} }
-    local set = ((phase or 0) % 2 == 1) and setA or setB
-    for _, p in ipairs(set) do out[#out+1] = p end
-    return out
+    -- Twinkle above the right arm (upper right, clear of the body).
+    local setA = { {5,27,"n"},{6,29,"l"},{7,28,"n"},{8,29,"n"},{6,26,"l"} }
+    local setB = { {5,28,"l"},{6,27,"n"},{7,29,"l"},{8,27,"n"},{5,26,"n"} }
+    return ((phase or 0) % 2 == 1) and setA or setB
 end
 
 Clawd.ANIMS = {
@@ -165,13 +173,24 @@ local function buildGrid(emotion, anim, phase)
     return g
 end
 
+-- Paint horizontal runs of same-colored cells (one paintRect per run).
 local function render(g, scale, bg)
     local bb = Blitbuffer.new(W * scale, H * scale, Blitbuffer.TYPE_BB8)
     bb:fill(bg or Blitbuffer.COLOR_WHITE)
     for r = 0, H - 1 do
-        for c = 0, W - 1 do
-            local color = PALETTE[g[r][c]]
-            if color then bb:paintRect(c * scale, r * scale, scale, scale, color) end
+        local row = g[r]
+        local c = 0
+        while c < W do
+            local ch = row[c]
+            local color = PALETTE[ch]
+            if color then
+                local c2 = c + 1
+                while c2 < W and row[c2] == ch do c2 = c2 + 1 end
+                bb:paintRect(c * scale, r * scale, (c2 - c) * scale, scale, color)
+                c = c2
+            else
+                c = c + 1
+            end
         end
     end
     return bb
@@ -197,6 +216,17 @@ function Clawd.emotionFor(max_pct, status)
     if max_pct >= 75 then return "strain" end
     if max_pct >= 50 then return "neutral" end
     return "love"
+end
+
+-- Mood from a per-model probe result (Models screen). is_up = no active
+-- incident for that model on status.claude.com.
+function Clawd.moodForProbe(code, is_up)
+    if is_up == false then return "dizzy" end      -- incident on Anthropic's side
+    if not code or code == 0 then return "neutral" end   -- not probed yet
+    if code == 200 then return "love" end
+    if code == 429 then return "strain" end
+    if code == 404 then return "dizzy" end
+    return "strain"                                -- 401/403 / 5xx / network
 end
 
 Clawd.W, Clawd.H = W, H

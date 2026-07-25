@@ -18,19 +18,40 @@ local LuaSettings = require("luasettings")
 local DataStorage = require("datastorage")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local UsageScreen = require("usagescreen")
+local ModelScreen = require("modelsscreen")
+local TrendScreen = require("trendscreen")
+local History = require("history")
 local LoginModal = require("loginmodal")
 local TokenServer = require("tokenserver")
 local NetworkMgr = require("ui/network/manager")
+local ButtonDialog = require("ui/widget/buttondialog")
+local Event = require("ui/event")
+local Screen = require("device").screen
 local Crypto = require("crypto")
 local ltn12 = require("ltn12")
 local https = require("ssl.https")
+local socket = require("socket")
 local T = require("i18n").t
 
 local ENDPOINT = "https://api.anthropic.com/v1/messages"
+local STATUS_ENDPOINT = "https://status.claude.com/api/v2/incidents/unresolved.json"
 local PROBE_MODEL = "claude-haiku-4-5-20251001"
 local CHANGE_COOLDOWN = 2              -- seconds between interval changes
 local LOGIN_PORT = 8099               -- LAN web receiver for the token
 local MAX_FAILS = 8                   -- wrong PIN tries before wiping the token
+
+-- Models probed (rotated one-per-cycle) on the Models screen.
+local MODELS = {
+    { id = "claude-haiku-4-5-20251001", name = "Haiku"  },
+    { id = "claude-sonnet-5",           name = "Sonnet" },
+    { id = "claude-opus-4-8",           name = "Opus"   },
+    { id = "claude-fable-5",            name = "Fable"  },
+}
+local PAGES_IMPL = 3                   -- navigable pages (dashboard, models, 5h trend)
+local DOTS_TOTAL = 4                   -- carousel dots shown (extra = placeholder)
+local INTERVAL_CYCLE = { 0, 5, 10, 15, 30 }
+local ROTA_PORTRAIT  = Screen.DEVICE_ROTATED_UPRIGHT or 0
+local ROTA_LANDSCAPE = Screen.DEVICE_ROTATED_CLOCKWISE or 1
 
 local ClaudeUsage = WidgetContainer:extend{
     name = "claudeusage",
@@ -41,6 +62,18 @@ function ClaudeUsage:init()
     self.settings = LuaSettings:open(DataStorage:getSettingsDir() .. "/claudeusage.lua")
     self.refresh_interval = self.settings:readSetting("refresh_interval") or 0
     self.change_locked = false
+    -- Exposed to the screens (page nav + model list).
+    self.MODELS = MODELS
+    self.PAGES_IMPL = PAGES_IMPL
+    self.DOTS_TOTAL = DOTS_TOTAL
+    self._probe_idx = 0
+    self._model_results = {}
+    self._incidents = nil
+    self.history = History.new(DataStorage:getSettingsDir() .. "/claudeusage_history.lua")
+    -- Global rotation state (restored on closeUI) + current open screen.
+    self.rotate_landscape = false
+    self.orig_rotation = nil
+    self.cur_screen = nil
     -- Stable callback ref so UIManager:unschedule works.
     self.unlock_task = function() self.change_locked = false end
 
@@ -67,6 +100,18 @@ function ClaudeUsage:addToMainMenu(menu_items)
                 keep_menu_open = true,
                 enabled_func = function() return self:hasToken() end,
                 callback = function() self:showUsage() end,
+            },
+            {
+                text = T("Models"),
+                keep_menu_open = true,
+                enabled_func = function() return self:hasToken() end,
+                callback = function() self:showModels() end,
+            },
+            {
+                text = T("Janela de 5h"),
+                keep_menu_open = true,
+                enabled_func = function() return self:hasToken() end,
+                callback = function() self:showTrend() end,
             },
             {
                 text = T("Login (web)"),
@@ -269,19 +314,248 @@ function ClaudeUsage:fetch(arg_token)
     return headers, code
 end
 
--- Open the fullscreen dashboard, unlocking the token first if needed.
-function ClaudeUsage:showUsage()
+-- Probe one specific model; returns { code, ms, auth }. Body discarded (~1 token).
+function ClaudeUsage:fetchModelProbe(model_id)
+    local token = self.session_token
+    if not token or token == "" then return { code = 0 } end
+
+    local body = string.format(
+        '{"model":"%s","max_tokens":1,"messages":[{"role":"user","content":"."}]}',
+        model_id)
+
+    local t0 = socket.gettime()
+    local resp = {}
+    local ok, code = https.request{
+        url = ENDPOINT,
+        method = "POST",
+        headers = {
+            ["authorization"]     = "Bearer " .. token,
+            ["anthropic-version"] = "2023-06-01",
+            ["anthropic-beta"]    = "oauth-2025-04-20",
+            ["content-type"]      = "application/json",
+            ["user-agent"]        = "claude-code/2.1.5",
+            ["content-length"]    = tostring(#body),
+        },
+        source = ltn12.source.string(body),
+        sink = ltn12.sink.table(resp),
+        protocol = "tlsv1_2",
+    }
+    local ms = math.floor((socket.gettime() - t0) * 1000 + 0.5)
+
+    if not ok then return { code = -1, ms = ms } end          -- network failure
+    local auth = (code == 401 or code == 403)
+    -- On any non-200, keep the API's error message so we can see WHY (e.g. a
+    -- 429 that is really "model not available on your plan" vs a rate limit).
+    local reason
+    if code ~= 200 then
+        local b = table.concat(resp)
+        reason = b:match('"message"%s*:%s*"(.-)"') or b:match('"type"%s*:%s*"(.-)"')
+        if reason and #reason > 60 then reason = reason:sub(1, 60) .. "…" end
+    end
+    return { code = code, ms = ms, auth = auth, reason = reason }
+end
+
+-- GET status.claude.com unresolved incidents; per-model up/down heuristic.
+-- Returns { has_data = bool, up = { Haiku = bool, ... } }.
+function ClaudeUsage:fetchIncidents()
+    local resp = {}
+    local ok, code = https.request{
+        url = STATUS_ENDPOINT,
+        method = "GET",
+        headers = { ["user-agent"] = "claude-usage-reader/1.0" },
+        sink = ltn12.sink.table(resp),
+        protocol = "tlsv1_2",
+    }
+    if not ok or code ~= 200 then return { has_data = false, up = {} } end
+    local body = table.concat(resp):lower()
+    local up = {}
+    for _, m in ipairs(MODELS) do
+        -- name absent from the incident feed => model is up
+        up[m.name] = (body:find(m.name:lower(), 1, true) == nil)
+    end
+    return { has_data = true, up = up }
+end
+
+-- Refresh incidents at most every 5 minutes (they change rarely; a GET per
+-- refresh cycle is wasted Kindle radio time).
+local INCIDENTS_TTL = 300
+function ClaudeUsage:maybeFetchIncidents()
+    local now = os.time()
+    if self._incidents and self._incidents_ts
+       and now - self._incidents_ts < INCIDENTS_TTL then
+        return
+    end
+    local inc = self:fetchIncidents()
+    if inc.has_data or not self._incidents then
+        self._incidents = inc
+        self._incidents_ts = now
+    end
+end
+
+-- Probe the next model in rotation. Returns (idx, auth).
+function ClaudeUsage:refreshNextModel()
+    local idx = (self._probe_idx % #MODELS) + 1
+    self._probe_idx = idx
+    local res = self:fetchModelProbe(MODELS[idx].id)
+    self._model_results[idx] = res
+    self:maybeFetchIncidents()
+    return idx, res.auth == true
+end
+
+-- Probe ALL models in one shot (eager). Returns auth.
+-- ~4 tokens and ~6-12s on a Kindle (sequential HTTPS), so the UI blocks briefly.
+function ClaudeUsage:refreshAllModels()
+    local auth = false
+    for i, m in ipairs(MODELS) do
+        local res = self:fetchModelProbe(m.id)
+        self._model_results[i] = res
+        if res.auth then auth = true end
+    end
+    self:maybeFetchIncidents()
+    return auth
+end
+
+-- Models screen entry point: eager only while some model has never been
+-- probed; after that, rotate one model per cycle (4x fewer tokens/requests).
+function ClaudeUsage:refreshModels()
+    for i = 1, #MODELS do
+        if not self._model_results[i] then
+            return self:refreshAllModels()
+        end
+    end
+    local _idx, auth = self:refreshNextModel()
+    return auth
+end
+
+-- Ensure the token is unlocked, then run cb().
+function ClaudeUsage:withUnlocked(cb)
     if not self:hasToken() then
         UIManager:show(InfoMessage:new{ text = T("Please log in first.") })
         return
     end
     if not self:isUnlocked() then
-        self:promptUnlock(function()
-            UIManager:show(UsageScreen:new{ plugin = self })
-        end)
+        self:promptUnlock(cb)
         return
     end
-    UIManager:show(UsageScreen:new{ plugin = self })
+    cb()
+end
+
+-- Record a 5h-utilization sample for the trend screen's history.
+function ClaudeUsage:recordSample(v)
+    if v then self.history:push(os.time(), v) end
+end
+
+-- Capture the device rotation the first time we enter the plugin UI.
+function ClaudeUsage:enterUI()
+    if self.orig_rotation == nil then
+        self.orig_rotation = Screen:getRotationMode()
+    end
+end
+
+-- Apply the plugin's rotation choice to the device (affects all pages).
+function ClaudeUsage:applyRotation()
+    local target = self.rotate_landscape and ROTA_LANDSCAPE or ROTA_PORTRAIT
+    UIManager:broadcastEvent(Event:new("SetRotationMode", target))
+end
+
+-- Toggle/set landscape; re-lay the current screen.
+function ClaudeUsage:setRotationLandscape(landscape)
+    self.rotate_landscape = landscape and true or false
+    self:applyRotation()
+    if self.cur_screen then self.cur_screen:rebuild() end
+end
+
+-- Advance the auto-refresh interval to the next value in the cycle.
+function ClaudeUsage:cycleInterval()
+    local cur = self.refresh_interval
+    local nxt = INTERVAL_CYCLE[1]
+    for i, v in ipairs(INTERVAL_CYCLE) do
+        if v == cur then nxt = INTERVAL_CYCLE[(i % #INTERVAL_CYCLE) + 1]; break end
+    end
+    if self:setRefreshInterval(nxt) and self.cur_screen then
+        self.cur_screen:rescheduleRefresh()
+        self.cur_screen:rebuild()
+    end
+end
+
+-- Fully close the plugin UI: restore the original device rotation.
+function ClaudeUsage:closeUI()
+    self.history:flush()   -- persist any samples held back by the throttle
+    if self.orig_rotation ~= nil then
+        UIManager:broadcastEvent(Event:new("SetRotationMode", self.orig_rotation))
+        self.orig_rotation = nil
+    end
+    if self.cur_screen then
+        UIManager:close(self.cur_screen)
+        self.cur_screen = nil
+    end
+end
+
+-- Settings dialog (gear icon): rotation, refresh interval, close app.
+function ClaudeUsage:showSettings()
+    local dlg
+    local function close_dlg() if dlg then UIManager:close(dlg) end end
+    local interval_row = {}
+    for _, v in ipairs(INTERVAL_CYCLE) do
+        local label = (v == 0) and T("Off") or (v .. "s")
+        if v == self.refresh_interval then label = label .. " •" end
+        table.insert(interval_row, {
+            text = label,
+            callback = function()
+                close_dlg()
+                if self:setRefreshInterval(v) and self.cur_screen then
+                    self.cur_screen:rescheduleRefresh()
+                    self.cur_screen:rebuild()
+                end
+            end,
+        })
+    end
+    dlg = ButtonDialog:new{
+        title = T("Configuracoes"),
+        title_align = "center",
+        buttons = {
+            {{
+                text = self.rotate_landscape and T("Girar: Retrato") or T("Girar: Paisagem"),
+                callback = function()
+                    close_dlg()
+                    self:setRotationLandscape(not self.rotate_landscape)
+                end,
+            }},
+            interval_row,
+            {{
+                text = T("Fechar app"),
+                callback = function() close_dlg(); self:closeUI() end,
+            }},
+        },
+    }
+    UIManager:show(dlg)
+end
+
+-- Show a page by index (1 = dashboard, 2 = models, 3 = 5h trend). Assumes unlocked.
+function ClaudeUsage:openPage(idx)
+    if idx < 1 or idx > PAGES_IMPL then return end
+    self:enterUI()
+    local ScreenCls = (idx == 2) and ModelScreen
+                   or (idx == 3) and TrendScreen
+                   or UsageScreen
+    self.cur_screen = ScreenCls:new{ plugin = self, page_idx = idx }
+    UIManager:show(self.cur_screen)
+    self:applyRotation()
+end
+
+-- Open the fullscreen dashboard, unlocking the token first if needed.
+function ClaudeUsage:showUsage()
+    self:withUnlocked(function() self:openPage(1) end)
+end
+
+-- Open the Models screen, unlocking the token first if needed.
+function ClaudeUsage:showModels()
+    self:withUnlocked(function() self:openPage(2) end)
+end
+
+-- Open the 5h-window trend screen, unlocking the token first if needed.
+function ClaudeUsage:showTrend()
+    self:withUnlocked(function() self:openPage(3) end)
 end
 
 return ClaudeUsage

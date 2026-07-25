@@ -1,11 +1,17 @@
 --[[
 UsageScreen — fullscreen Claude usage dashboard for KOReader (e-ink, grayscale).
 
-Two cards (session 5h / weekly 7d): big %, progress bar, reset date + countdown.
-Clawd mascot with usage-driven resting face + random occasional animations
-(blink / shy / heart / sparkle). A tappable label cycles the fetch interval; a
-"Girar" button flips portrait<->landscape (the device has no rotation sensor);
-"X Fechar" closes. Auto-refresh + animations run only while this screen is open.
+Layout mirrors the wireframe (PT labels, light theme): header shows
+"atualizado HH:MM" + a FECHAR pill; two cards (session 5h / weekly 7d) with big
+%, progress bar, "RESETA EM - <DIA HH:MM>" and a big countdown; a lower band with
+the Clawd mascot (left) and a real-data column (right): STATUS, biggest usage,
+an ATUALIZA pill that cycles the fetch interval, and a GIRAR pill that flips
+portrait<->landscape (the device has no rotation sensor). Page dots at the bottom
+are a static placeholder for a future page 2. The wireframe's "tokens janela
+entrada/saída" are omitted — subscription accounts expose only percentages, never
+raw token counts. Clawd's resting face is usage-driven with random occasional
+animations (blink / shy / heart / sparkle). Auto-refresh + animations run only
+while this screen is open.
 ]]--
 
 local InputContainer = require("ui/widget/container/inputcontainer")
@@ -18,6 +24,7 @@ local HorizontalSpan = require("ui/widget/horizontalspan")
 local TextWidget = require("ui/widget/textwidget")
 local LineWidget = require("ui/widget/linewidget")
 local ProgressWidget = require("ui/widget/progresswidget")
+local IconWidget = require("ui/widget/iconwidget")
 local GestureRange = require("ui/gesturerange")
 local Blitbuffer = require("ffi/blitbuffer")
 local Geom = require("ui/geometry")
@@ -28,13 +35,12 @@ local Screen = require("device").screen
 local Clawd = require("clawd")
 local T = require("i18n").t
 
-local INTERVAL_CYCLE = { 0, 5, 10, 15, 30 }
 local ANIM_MIN, ANIM_MAX = 5, 20          -- random seconds between animations
-local ROTA_PORTRAIT  = Screen.DEVICE_ROTATED_UPRIGHT or 0
-local ROTA_LANDSCAPE = Screen.DEVICE_ROTATED_CLOCKWISE or 1
+local NAV_LABELS = { T("Uso"), T("Modelos"), T("5h") }
 
 local UsageScreen = InputContainer:extend{
     plugin = nil,
+    page_idx = 1,
     data = nil,
     err = nil,
     cur_anim = nil,     -- animation name (nil = resting)
@@ -56,9 +62,11 @@ local function pct_str(frac)
     if not frac then return "--%" end
     return string.format("%d%%", math.floor(frac * 100 + 0.5))
 end
+local WEEKDAYS_PT = { "DOM", "SEG", "TER", "QUA", "QUI", "SEX", "SÁB" }
 local function reset_date(epoch)
     if not epoch then return "--" end
-    return os.date("%a %H:%M", epoch)
+    local t = os.date("*t", epoch)
+    return string.format("%s %02d:%02d", WEEKDAYS_PT[t.wday] or "--", t.hour, t.min)
 end
 local function reset_in(epoch)
     if not epoch then return "--" end
@@ -66,8 +74,8 @@ local function reset_in(epoch)
     if secs < 0 then return T("now") end
     local hrs = math.floor(secs / 3600)
     local mins = math.floor((secs % 3600) / 60)
-    if hrs > 24 then return string.format("%dd %dh", math.floor(hrs / 24), hrs % 24) end
-    return string.format("%dh %dm", hrs, mins)
+    if hrs > 24 then return string.format("%dD %dH", math.floor(hrs / 24), hrs % 24) end
+    return string.format("%dH %dM", hrs, mins)
 end
 
 function UsageScreen:init()
@@ -78,13 +86,15 @@ function UsageScreen:init()
     self._disposables = {}
     math.randomseed(os.time())
 
-    self.close_btn = nil
-    self.interval_btn = nil
-    self.rotate_btn = nil
+    self.settings_btn = nil
+    self.nav_btns = nil
     self._mascot_ref = nil
     self._mascot_bbox = nil
 
-    self.ges_events = { Tap = { GestureRange:new{ ges = "tap", range = self.dimen } } }
+    self.ges_events = {
+        Tap = { GestureRange:new{ ges = "tap", range = self.dimen } },
+        Swipe = { GestureRange:new{ ges = "swipe", range = self.dimen } },
+    }
 
     self.refresh_task = function() self:doFetch() end
     self.anim_task = function() self:playRandomAnim() end
@@ -98,7 +108,12 @@ end
 function UsageScreen:doFetch()
     if self.closed then return end
     local h, err, auth = self.plugin:fetch()
-    if h then self.data, self.err = h, nil else self.err = err end
+    if h then
+        self.data, self.err = h, nil
+        self.plugin:recordSample(num(h, "anthropic-ratelimit-unified-5h-utilization"))
+    else
+        self.err = err
+    end
     self.last_ok = os.time()
     self:rebuild()
     if auth then self.plugin:webLogin() end   -- token expired -> QR login modal
@@ -145,13 +160,13 @@ function UsageScreen:playRandomAnim()
         i = i + 1
         if i > spec.frames then
             self.cur_anim, self.cur_phase, self.cur_bob = nil, 0, 0
-            self:rebuild()
+            self:rebuild(true)
             self:scheduleNextAnim()
             return
         end
         self.cur_anim, self.cur_phase = name, i
         self.cur_bob = (i % 2 == 0) and sb(3) or 0
-        self:rebuild()
+        self:rebuild(true)
         UIManager:scheduleIn(spec.step, step)
     end
     step()
@@ -200,13 +215,13 @@ function UsageScreen:triggerShy()
         i = i + 1
         if i > spec.frames then
             self.cur_anim, self.cur_phase, self.cur_bob = nil, 0, 0
-            self:rebuild()
+            self:rebuild(true)
             self:scheduleNextAnim()
             return
         end
         self.cur_phase = i
         self.cur_bob = (i % 2 == 0) and sb(3) or 0
-        self:rebuild()
+        self:rebuild(true)
         UIManager:scheduleIn(spec.step, step)
     end
     step()
@@ -219,11 +234,19 @@ function UsageScreen:onTap(a, b)
     if self.close_btn and inside(expand(self.close_btn.dimen, m), pos) then
         self:onClose(); return true
     end
-    if self.rotate_btn and inside(expand(self.rotate_btn.dimen, m), pos) then
-        self:toggleRotation(); return true
+    if self.refresh_btn and inside(expand(self.refresh_btn.dimen, m), pos) then
+        self.plugin:cycleInterval(); return true
     end
-    if self.interval_btn and inside(expand(self.interval_btn.dimen, m), pos) then
-        self:cycleInterval(); return true
+    if self.rot_p and inside(expand(self.rot_p.dimen, m), pos) then
+        self.plugin:setRotationLandscape(false); return true
+    end
+    if self.rot_l and inside(expand(self.rot_l.dimen, m), pos) then
+        self.plugin:setRotationLandscape(true); return true
+    end
+    for i, btn in ipairs(self.nav_btns or {}) do
+        if i ~= self.page_idx and inside(expand(btn.dimen, m), pos) then
+            UIManager:close(self); self.plugin:openPage(i); return true
+        end
     end
     -- Tap on the mascot -> shy animation
     local bbox = self:mascotBBox()
@@ -233,27 +256,23 @@ function UsageScreen:onTap(a, b)
     return true
 end
 
-function UsageScreen:cycleInterval()
-    local cur = self.plugin.refresh_interval
-    local nxt = INTERVAL_CYCLE[1]
-    for i, v in ipairs(INTERVAL_CYCLE) do
-        if v == cur then nxt = INTERVAL_CYCLE[(i % #INTERVAL_CYCLE) + 1]; break end
+-- Swipe left/right to move between pages (dashboard <-> models).
+-- KOReader swipe directions are compass points: west = finger moved left.
+function UsageScreen:onSwipe(a, b)
+    local ges = b or a
+    local dir = ges and ges.direction
+    local t = (dir == "west") and self.page_idx + 1
+           or (dir == "east") and self.page_idx - 1 or nil
+    if t and t >= 1 and t <= self.plugin.PAGES_IMPL and t ~= self.page_idx then
+        UIManager:close(self)
+        self.plugin:openPage(t)
     end
-    if self.plugin:setRefreshInterval(nxt) then
-        self:rescheduleRefresh()
-        self:rebuild()
-    end
+    return true
 end
 
-function UsageScreen:toggleRotation()
-    local target = (Screen:getWidth() > Screen:getHeight()) and ROTA_PORTRAIT or ROTA_LANDSCAPE
-    UIManager:broadcastEvent(Event:new("SetRotationMode", target))
-    self.rotated = (target ~= self.orig_rotation)
-    self:rebuild()
-end
-
+-- Back key / hardware close -> full exit (restores rotation via the plugin).
 function UsageScreen:onClose()
-    UIManager:close(self)
+    self.plugin:closeUI()
     return true
 end
 
@@ -261,9 +280,6 @@ function UsageScreen:onCloseWidget()
     self.closed = true
     UIManager:unschedule(self.refresh_task)
     UIManager:unschedule(self.anim_task)
-    if self.rotated then
-        UIManager:broadcastEvent(Event:new("SetRotationMode", self.orig_rotation))
-    end
 end
 
 -- layout --------------------------------------------------------------------
@@ -288,7 +304,7 @@ function UsageScreen:makeCard(title, frac, epoch, card_w)
         VerticalSpan:new{ width = sb(8) },
         bar,
         VerticalSpan:new{ width = sb(12) },
-        TextWidget:new{ text = T("RESETS AT ") .. reset_date(epoch),
+        TextWidget:new{ text = T("RESETA EM - ") .. reset_date(epoch),
                         face = face(12), fgcolor = Blitbuffer.Color8(0x77) },
         VerticalSpan:new{ width = sb(2) },
         TextWidget:new{ text = reset_in(epoch), face = face(28), bold = true },
@@ -320,9 +336,9 @@ end
 
 function UsageScreen:statusText()
     local status = self.data and self.data["anthropic-ratelimit-unified-status"]
-    if self.err then return T("network error") end
-    if status == "rejected" then return T("LIMITED") end
-    if status == "allowed_warning" then return T("WARNING") end
+    if self.err then return T("erro de rede") end
+    if status == "rejected" then return T("LIMITADO") end
+    if status == "allowed_warning" then return T("AVISO") end
     if status == "allowed" then return "OK" end
     return "..."
 end
@@ -337,39 +353,117 @@ local function pill(text, bg)
 end
 
 function UsageScreen:buildHeader(updated)
-    local head_scale = math.max(2, math.floor(self.mascot_scale / 4))
-    local left = HorizontalGroup:new{
-        align = "center",
-        self:mkClawd("neutral", head_scale, nil),
-        HorizontalSpan:new{ width = sb(8) },
-        TextWidget:new{ text = "CLAUDE CODE", face = face(18), bold = true },
-    }
-    self.close_btn = pill(T("X Close"), Blitbuffer.Color8(0xF4))
+    local lw = self.width - 2 * sb(16)
+    local left = TextWidget:new{ text = updated, face = face(14),
+                                 fgcolor = Blitbuffer.Color8(0x77) }
+    local secs = self.plugin.refresh_interval
+    local itxt = (secs == 0) and T("AUTO OFF") or string.format(T("AUTO %ds"), secs)
+    self.refresh_btn = pill(itxt, Blitbuffer.COLOR_WHITE)
+    self.close_btn = pill(T("FECHAR"), Blitbuffer.Color8(0xF4))
     local right = HorizontalGroup:new{
         align = "center",
-        TextWidget:new{ text = updated, face = face(12), fgcolor = Blitbuffer.Color8(0x77) },
-        HorizontalSpan:new{ width = sb(12) },
+        self.refresh_btn,
+        HorizontalSpan:new{ width = sb(8) },
         self.close_btn,
     }
-    local gap = math.max(sb(8), self.width - left:getSize().w - right:getSize().w - sb(20))
-    return HorizontalGroup:new{ align = "center", left, HorizontalSpan:new{ width = gap }, right }
-end
-
-function UsageScreen:buildFooter(interval_txt)
-    self.interval_btn = pill(interval_txt .. T(" (tap)"), Blitbuffer.COLOR_WHITE)
-    self.rotate_btn = pill(T("Rotate"), Blitbuffer.Color8(0xF4))
+    local gap = math.max(sb(8), lw - left:getSize().w - right:getSize().w)
     return HorizontalGroup:new{
         align = "center",
-        pill(self:statusText()),
-        HorizontalSpan:new{ width = sb(18) },
-        self.rotate_btn,
-        HorizontalSpan:new{ width = sb(18) },
-        self.interval_btn,
+        left,
+        HorizontalSpan:new{ width = gap },
+        right,
     }
 end
 
-function UsageScreen:rebuild()
+-- Bottom navigation: one text button per page, current highlighted. Refs kept
+-- in self.nav_btns for tap hit-testing (onTap -> plugin:openPage).
+function UsageScreen:makeNav(active)
+    self.nav_btns = {}
+    local grp = HorizontalGroup:new{ align = "center" }
+    for i, label in ipairs(NAV_LABELS) do
+        local active_i = (i == active)
+        local btn = FrameContainer:new{
+            bordersize = sb(1), radius = sb(12), padding = sb(6), margin = 0,
+            bordercolor = Blitbuffer.Color8(0x88),
+            background = active_i and Blitbuffer.Color8(0x66) or Blitbuffer.COLOR_WHITE,
+            TextWidget:new{ text = " " .. label .. " ", face = face(14), bold = true,
+                fgcolor = active_i and Blitbuffer.COLOR_WHITE or Blitbuffer.Color8(0x22) },
+        }
+        self.nav_btns[i] = btn
+        table.insert(grp, btn)
+        if i < #NAV_LABELS then table.insert(grp, HorizontalSpan:new{ width = sb(12) }) end
+    end
+    return grp
+end
+
+-- Bottom bar: rotate buttons in each corner (left=portrait, right=landscape)
+-- with the page navigation centered between them.
+function UsageScreen:makeBottomBar(active)
+    local nav = self:makeNav(active)
+    self.rot_p = pill(T("RETRATO"), Blitbuffer.Color8(0xF4))
+    self.rot_l = pill(T("PAISAGEM"), Blitbuffer.Color8(0xF4))
+    local lw = self.width - 2 * sb(16)
+    local sp = math.max(sb(8), math.floor(
+        (lw - self.rot_p:getSize().w - self.rot_l:getSize().w - nav:getSize().w) / 2))
+    return HorizontalGroup:new{
+        align = "center",
+        self.rot_p,
+        HorizontalSpan:new{ width = sp },
+        nav,
+        HorizontalSpan:new{ width = sp },
+        self.rot_l,
+    }
+end
+
+-- Right-hand data column: real obtainable data (interval/rotate now live in the
+-- settings dialog behind the gear icon).
+function UsageScreen:buildDataColumn()
+    return VerticalGroup:new{
+        align = "left",
+        TextWidget:new{ text = T("STATUS: ") .. self:statusText(),
+                        face = face(15), bold = true },
+        VerticalSpan:new{ width = sb(6) },
+        TextWidget:new{ text = string.format(T("MAIOR USO: %d%%"), self:maxPct()),
+                        face = face(13), fgcolor = Blitbuffer.Color8(0x77) },
+    }
+end
+
+-- Full-screen white frame in three blocks: top (header) anchored, bottom bar
+-- pinned, and the body centered in the leftover space (40% above / 60% below)
+-- so the screen fills evenly instead of leaving one big gap.
+function UsageScreen:_screenFrame(top, body, bottom)
+    local pad = sb(14)
+    local leftover = math.max(sb(16), self.height - top:getSize().h
+                     - body:getSize().h - bottom:getSize().h - pad)
+    local s1 = math.max(sb(8), math.floor(leftover * 0.4))
+    local s2 = math.max(sb(8), leftover - s1)
+    local content = VerticalGroup:new{
+        align = "center",
+        top,
+        VerticalSpan:new{ width = s1 },
+        body,
+        VerticalSpan:new{ width = s2 },
+        bottom,
+        VerticalSpan:new{ width = pad },
+    }
+    return FrameContainer:new{
+        width = self.width, height = self.height,
+        bordersize = 0, padding = 0, margin = 0,
+        background = Blitbuffer.COLOR_WHITE,
+        content,
+    }
+end
+
+function UsageScreen:rebuild(anim_only)
     if self.closed then return end
+    -- Animation frames repaint only the mascot area (less e-ink flashing).
+    -- Capture the previous mascot bbox BEFORE tearing the tree down; its
+    -- position is stable across frames (bob is covered by the margin).
+    local dirty_region
+    if anim_only then
+        local bbox = self:mascotBBox()
+        if bbox then dirty_region = expand(bbox, sb(10)) end
+    end
     for _i, w in ipairs(self._disposables or {}) do
         if w.free then w:free() end
     end
@@ -381,7 +475,8 @@ function UsageScreen:rebuild()
     self.dimen.w, self.dimen.h = self.width, self.height
     local landscape = self.width > self.height
     local base = math.min(self.width, self.height)
-    self.mascot_scale = math.max(4, math.floor((base * 0.34) / Clawd.W))
+    local lw = self.width - 2 * sb(16)          -- inner width (side margins)
+    self.mascot_scale = math.max(4, math.floor((base * 0.42) / Clawd.W))
 
     local h = self.data
     local p5 = num(h, "anthropic-ratelimit-unified-5h-utilization")
@@ -389,71 +484,63 @@ function UsageScreen:rebuild()
     local e5 = num(h, "anthropic-ratelimit-unified-5h-reset")
     local e7 = num(h, "anthropic-ratelimit-unified-7d-reset")
 
-    local secs = self.plugin.refresh_interval
-    local interval_txt = (secs == 0) and T("auto: off") or string.format(T("auto: %ds"), secs)
-    local updated = self.err and T("failed") or (h and T("updated now") or T("loading..."))
+    local updated = self.err and T("falhou")
+        or (h and (T("atualizado ") .. os.date("%H:%M", self.last_ok)) or T("carregando..."))
 
     local header = self:buildHeader(updated)
-    local footer = self:buildFooter(interval_txt)
+    local bottom = self:makeBottomBar(self.page_idx)
     local divider = LineWidget:new{ background = Blitbuffer.Color8(0xB4),
-        dimen = Geom:new{ w = self.width - sb(40), h = sb(2) } }
+        dimen = Geom:new{ w = lw, h = sb(2) } }
+
+    -- Mascot (left) + real-data column (right) — the wireframe's lower band.
+    local lower = HorizontalGroup:new{
+        align = "center",
+        self:mascotHolder(),
+        HorizontalSpan:new{ width = sb(28) },
+        self:buildDataColumn(),
+    }
 
     local body
     if landscape then
-        local card_w = math.floor(self.width * 0.38)
+        local card_w = math.floor(lw * 0.44)
         local cards_col = VerticalGroup:new{
             align = "center",
-            self:makeCard(T("5 HOURS"), p5, e5, card_w),
+            self:makeCard(T("5 HORAS"), p5, e5, card_w),
             VerticalSpan:new{ width = sb(12) },
-            self:makeCard(T("WEEK"), p7, e7, card_w),
+            self:makeCard(T("SEMANAL"), p7, e7, card_w),
         }
         body = HorizontalGroup:new{
             align = "center",
             cards_col,
             HorizontalSpan:new{ width = sb(28) },
-            self:mascotHolder(),
+            lower,
         }
     else
-        local card_w = math.floor((self.width - sb(36)) / 2)
+        local card_w = math.floor((lw - sb(12)) / 2)
         local cards = HorizontalGroup:new{
             align = "top",
-            self:makeCard(T("5 HOURS"), p5, e5, card_w),
+            self:makeCard(T("5 HORAS"), p5, e5, card_w),
             HorizontalSpan:new{ width = sb(12) },
-            self:makeCard(T("WEEK"), p7, e7, card_w),
+            self:makeCard(T("SEMANAL"), p7, e7, card_w),
         }
         body = VerticalGroup:new{
             align = "center",
             cards,
             VerticalSpan:new{ width = sb(20) },
-            self:mascotHolder(),
+            lower,
         }
     end
 
-    local content = VerticalGroup:new{
+    local top = VerticalGroup:new{
         align = "center",
         VerticalSpan:new{ width = sb(10) },
         header,
         VerticalSpan:new{ width = sb(6) },
         divider,
-        VerticalSpan:new{ width = sb(16) },
-        body,
-        VerticalSpan:new{ width = sb(16) },
-        footer,
     }
 
-    self[1] = FrameContainer:new{
-        width = self.width,
-        height = self.height,
-        bordersize = 0,
-        padding = 0,
-        margin = 0,
-        background = Blitbuffer.COLOR_WHITE,
-        CenterContainer:new{
-            dimen = Geom:new{ w = self.width, h = self.height },
-            content,
-        },
-    }
-    UIManager:setDirty(self, "ui")
+    self[1] = self:_screenFrame(top, body, bottom)
+    UIManager:setDirty(self, "ui", dirty_region)
 end
 
 return UsageScreen
