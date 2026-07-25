@@ -57,7 +57,17 @@ local PT = {
 
     -- trend page
     ["5H WINDOW"] = "JANELA DE 5H",
+    ["7D WINDOW"] = "JANELA DE 7D",
+    ["7D HEATMAP"] = "MAPA DA SEMANA",
     ["real use + projection"] = "uso real + projecao",
+    ["consumption per 6h block"] = "consumo por bloco de 6h",
+    ["darkest = %d%% of the week"] = "mais escuro = %d%% da semana",
+    ["no consumption measured yet"] = "nenhum consumo medido ainda",
+    ["%d/%d blocks measured - only while the app is open"] =
+        "%d/%d blocos medidos - so coleta com o app aberto",
+    ["not enough data - the app only samples while open"] =
+        "dados insuficientes - so coleta com o app aberto",
+    [" - tap to switch"] = " - toque para trocar",
     ["Exhausted - resets in "] = "Esgotado - reseta em ",
     ["Steady at this pace"] = "Uso estável neste ritmo",
     ["At this pace, exhausted %s (in %dm)"] = "Neste ritmo, esgota %s (em %dm)",

@@ -65,7 +65,7 @@ function UsageScreen:doFetch()
     if h then
         self.data, self.err = h, nil
         self.last_ok = os.time()
-        self.plugin:recordSample(Fmt.num(h, H5_PCT))
+        self.plugin:recordSample(Fmt.num(h, H5_PCT), Fmt.num(h, H7_PCT))
     else
         self.err = err
     end

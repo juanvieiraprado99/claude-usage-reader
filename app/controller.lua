@@ -99,6 +99,9 @@ function ClaudeUsage:init()
     self._model_results = {}
     self._incidents = nil
     self.history = History.new(DATA_DIR .. "/claudeusage_history.lua")
+    -- Which window the trend screen plots, "5h" or "7d". Lives here and not on
+    -- the screen because openPage builds a fresh one on every navigation.
+    self.trend_mode = "5h"
     -- Rotation is a KOReader screen mode: 0 portrait, 1 landscape,
     -- 2 portrait upside down, 3 landscape upside down. Remembered across runs.
     self.rotation_mode = self.settings:readSetting("rotation_mode") or ROTA_PORTRAIT
@@ -496,9 +499,10 @@ function ClaudeUsage:withUnlocked(cb)
     cb()
 end
 
--- Record a 5h-utilization sample for the trend screen's history.
-function ClaudeUsage:recordSample(v)
-    if v then self.history:push(os.time(), v) end
+-- Record a utilization sample of each window for the trend screen's history.
+-- Either may be nil (a missing header); history.lua throttles the weekly one.
+function ClaudeUsage:recordSample(v5, v7)
+    if v5 or v7 then self.history:push(os.time(), v5, v7) end
 end
 
 -- Apply the app's rotation choice to the device (affects all pages).
