@@ -51,6 +51,25 @@ local INTERVAL_CYCLE = { 0, 10, 30, 60, 300 }
 local BACKOFF_MAX = 300                -- ceiling when the network keeps failing
 local ROTA_PORTRAIT = Screen.DEVICE_ROTATED_UPRIGHT or 0
 
+-- Every popup here opens over a page, and the pages set `modal = true` so the
+-- framework routes gestures to them instead of the touch zones underneath.
+-- UIManager:show inserts a NON-modal widget below any modal one, which for a
+-- fullscreen opaque page means underneath it - shown, dirty, repainted, and
+-- invisible. Marking our popups modal too puts them back on top.
+local function showOver(widget)
+    widget.modal = true
+    UIManager:show(widget)
+    return widget
+end
+
+-- InfoMessage draws a "notice-info" icon by default, and that goes IconWidget ->
+-- ImageWidget:_loadfile -> document/documentregistry, which prune.txt strips
+-- from the shipped runtime: every one of these popups threw instead of showing.
+-- show_icon = false keeps them to text, which is all they ever needed.
+local function notify(text)
+    return showOver(InfoMessage:new{ text = text, show_icon = false })
+end
+
 local ClaudeUsage = {}
 ClaudeUsage.__index = ClaudeUsage
 
@@ -111,7 +130,45 @@ function ClaudeUsage:logout()
     self.settings:delSetting("pin_fail")
     self.settings:flush()
     self.session_token = nil
-    UIManager:show(InfoMessage:new{ text = T("Token cleared.") })
+    notify(T("Token cleared."))
+end
+
+-- Clear the token and drop straight back to the login modal, keeping the app
+-- alive. Shared by the settings dialog and the bottom-bar button, so both do
+-- exactly the same thing.
+function ClaudeUsage:doLogout()
+    self:logout()
+    if self.cur_screen then
+        UIManager:close(self.cur_screen)
+        self.cur_screen = nil
+    end
+    self:webLogin()
+end
+
+-- Wrapped in a confirmation because the button sits one tap away on every
+-- screen: logging out wipes the stored token, and getting back in means the
+-- whole QR + PIN dance again.
+--
+-- ButtonDialog and not ConfirmBox: ConfirmBox draws an icon, which goes
+-- IconWidget -> ImageWidget:_loadfile -> document/documentregistry, and that is
+-- pruned from the shipped runtime. Same reason roticon.lua draws its own arrow.
+function ClaudeUsage:confirmLogout()
+    local dlg
+    dlg = ButtonDialog:new{
+        title = T("Log out and clear the stored token?"),
+        title_align = "center",
+        buttons = {{
+            {
+                text = T("Cancel"),
+                callback = function() UIManager:close(dlg) end,
+            },
+            {
+                text = T("Log out"),
+                callback = function() UIManager:close(dlg); self:doLogout() end,
+            },
+        }},
+    }
+    showOver(dlg)
 end
 
 -- Ask for a numeric PIN; calls on_pin(pin) with the entered value.
@@ -131,7 +188,7 @@ function ClaudeUsage:promptPin(title, on_pin)
               end },
         }},
     }
-    UIManager:show(dialog)
+    showOver(dialog)
     dialog:onShowKeyboard()
 end
 
@@ -149,11 +206,11 @@ function ClaudeUsage:promptUnlock(on_ok)
             local fails = (self.settings:readSetting("pin_fail") or 0) + 1
             if fails >= MAX_FAILS then
                 self:logout()
-                UIManager:show(InfoMessage:new{ text = T("Too many attempts — token wiped.") })
+                notify(T("Too many attempts — token wiped."))
             else
                 self.settings:saveSetting("pin_fail", fails)
                 self.settings:flush()
-                UIManager:show(InfoMessage:new{ text = T("Wrong PIN.") })
+                notify(T("Wrong PIN."))
             end
         end
     end)
@@ -162,14 +219,14 @@ end
 -- Encrypt a freshly-received token under a new PIN and store it.
 function ClaudeUsage:setPinAndStore(tok)
     if not Crypto.available() then
-        UIManager:show(InfoMessage:new{ text = T("Encryption unavailable — cannot store.") })
+        notify(T("Encryption unavailable — cannot store."))
         return
     end
     self:promptPin(T("Create a 4-digit PIN"), function(pin)
         if not pin or pin == "" then return end
         local blob = Crypto.encrypt(tok, pin)
         if not blob then
-            UIManager:show(InfoMessage:new{ text = T("Encryption unavailable — cannot store.") })
+            notify(T("Encryption unavailable — cannot store."))
             return
         end
         self.settings:saveSetting("enc", blob)
@@ -190,23 +247,23 @@ function ClaudeUsage:webLogin()
     if NetworkMgr and NetworkMgr.isConnected then
         local ok, connected = pcall(function() return NetworkMgr:isConnected() end)
         if ok and not connected then
-            UIManager:show(InfoMessage:new{ text = T("Connect the Kindle to WiFi first.") })
+            notify(T("Connect the Kindle to WiFi first."))
             return
         end
     end
     local ip = TokenServer.get_ip()
     if not ip then
-        UIManager:show(InfoMessage:new{ text = T("No network IP. Check WiFi.") })
+        notify(T("No network IP. Check WiFi."))
         return
     end
     self.login_open = true
-    UIManager:show(LoginModal:new{
+    showOver(LoginModal:new{
         ip = ip,
         port = LOGIN_PORT,
         on_token = function(tok)
             -- Validate the token before storing it (reject junk/expired).
             if not self:probeToken(tok) then
-                UIManager:show(InfoMessage:new{ text = T("Invalid token (rejected).") })
+                notify(T("Invalid token (rejected)."))
                 return
             end
             self:setPinAndStore(tok)
@@ -225,9 +282,10 @@ end
 -- Returns true if the interval actually changed, false if blocked by cooldown.
 function ClaudeUsage:setRefreshInterval(secs)
     if self.change_locked then
-        UIManager:show(InfoMessage:new{
+        showOver(InfoMessage:new{
             text = string.format(T("Wait %d s before changing again."), CHANGE_COOLDOWN),
             timeout = 1,
+            show_icon = false,
         })
         return false
     end
@@ -428,7 +486,7 @@ end
 -- Ensure the token is unlocked, then run cb().
 function ClaudeUsage:withUnlocked(cb)
     if not self:hasToken() then
-        UIManager:show(InfoMessage:new{ text = T("Log in first.") })
+        notify(T("Log in first."))
         return
     end
     if not self:isUnlocked() then
@@ -529,15 +587,8 @@ function ClaudeUsage:showSettings()
     if self:hasToken() then
         table.insert(account_row, {
             text = T("Logout (clear token)"),
-            callback = function()
-                close_dlg()
-                self:logout()
-                if self.cur_screen then
-                    UIManager:close(self.cur_screen)
-                    self.cur_screen = nil
-                end
-                self:webLogin()   -- back to the login modal, app stays alive
-            end,
+            -- No confirmation here: reaching this dialog is already deliberate.
+            callback = function() close_dlg(); self:doLogout() end,
         })
     else
         table.insert(account_row, {
@@ -565,7 +616,7 @@ function ClaudeUsage:showSettings()
             }},
         },
     }
-    UIManager:show(dlg)
+    showOver(dlg)
 end
 
 -- Show a page by index (1 = dashboard, 2 = models, 3 = 5h trend). Assumes unlocked.

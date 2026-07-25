@@ -126,6 +126,8 @@ function ScreenBase:onTap(a, b)
     -- The version label doubles as the way into the settings dialog, which is
     -- where login/logout live.
     if hit(self.ver_btn, pos, slop) then self.plugin:showSettings(); return true end
+    -- Confirmed, not immediate: this one is destructive and sits next to the nav.
+    if hit(self.logout_btn, pos, slop) then self.plugin:confirmLogout(); return true end
 
     for i, btn in ipairs(self.nav_btns or {}) do
         if i ~= self.page_idx and hit(btn, pos, slop) then
@@ -247,19 +249,43 @@ end
 function ScreenBase:makeBottomBar(active)
     local nav = self:makeNav(active)
     self.rot_btn = ScreenBase.rotPill()
-    self.ver_btn = TextWidget:new{ text = "v" .. Version, face = face(12),
-                                   fgcolor = C.faint }
+    -- Wrapped, not a bare TextWidget: TextWidget:paintTo never assigns
+    -- self.dimen, and hit() tests exactly that - so the tap that opens the
+    -- settings dialog silently never registered. FrameContainer sets it.
+    self.ver_btn = FrameContainer:new{
+        bordersize = 0, padding = sb(4), margin = 0, background = C.white,
+        TextWidget:new{ text = "v" .. Version, face = face(12), bold = true,
+                        fgcolor = C.faint },
+    }
+
+    -- Logout also lives in the settings dialog, but that dialog is only reachable
+    -- by tapping the version label - an invisible target nobody finds. This is
+    -- the discoverable copy. Only while there is a token to clear; cleared
+    -- explicitly, or a stale ref would stay hit-testable after logging out.
+    local right = self.ver_btn
+    if self.plugin:hasToken() then
+        self.logout_btn = ScreenBase.pill(T("LOGOUT"), C.fill)
+        right = HorizontalGroup:new{
+            align = "center",
+            self.logout_btn,
+            HorizontalSpan:new{ width = sb(Theme.GAP) },
+            self.ver_btn,
+        }
+    else
+        self.logout_btn = nil
+    end
+
     local lw = self.width - 2 * sb(Theme.MARGIN)
     local half = (lw - nav:getSize().w) / 2
     local sp_l = math.max(sb(Theme.GAP), math.floor(half - self.rot_btn:getSize().w))
-    local sp_r = math.max(sb(Theme.GAP), math.floor(half - self.ver_btn:getSize().w))
+    local sp_r = math.max(sb(Theme.GAP), math.floor(half - right:getSize().w))
     return HorizontalGroup:new{
         align = "center",
         self.rot_btn,
         HorizontalSpan:new{ width = sp_l },
         nav,
         HorizontalSpan:new{ width = sp_r },
-        self.ver_btn,
+        right,
     }
 end
 
