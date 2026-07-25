@@ -13,16 +13,32 @@ retired.
 
 There is no test suite. Official artifacts come from CI: every push to `main`
 runs `.github/workflows/release.yml`, which smoke-boots the app headless, builds
-the matrix `[kindlepw2, kindlehf]` and publishes a release `v<VERSION>.<run>`
-with four files. Version sources: `VERSION` (app, major.minor) and
+the matrix `[kindlepw2, kindlehf]` and publishes a release `v<VERSION>` with four
+files. Version sources: `VERSION` (the app, full `major.minor.patch`) and
 `packaging/KOREADER_VERSION` (which KOReader release the runtime is cut from) —
 both single-line, both the only place to bump.
+
+**`VERSION` is the single source and nothing derives from it.** `build.sh` reads
+it, CI reads it, the release tag is it. Bump it in the same commit as the change
+you want released. A push that does not bump it still builds and smoke-tests,
+but the release step sees the tag already exists and skips with a notice — so
+main never goes red just because the version did not move. The patch digit used
+to be `github.run_number`, which meant a release said `v0.1.2` while the repo
+said `0.1` and a local build said `0.1.0`; three answers, none of them
+authoritative.
 
 Locally the build is `packaging/fetch-runtime.sh` (once) then
 `packaging/build.sh`, producing TWO artifacts from one staged tree:
 a KUAL zip (unzip into `/mnt/us/extensions/`) and a **KPM** `.kpkg`
 (`;kpm install claudeusage` after `;kpm add-repo`). KPM is the path for
 Springbreak/Winterbreak jailbreaks.
+
+On Windows use **`packaging/build-docker.sh`** instead — the same script in a
+container. `build.sh` needs `zip` and a real `python3`, and a Windows checkout
+usually has neither (the WindowsApps `python3` is a Store stub that exits
+non-zero). It does not fail on that: it stages `dist/claudeusage/` and skips
+both archives, so a `dist/` with only the folder in it means the tools were
+missing, not that the build broke.
 
 App data is `/mnt/us/claudeusage/` — deliberately outside the install dir,
 because `kpm upgrade` replaces the whole package directory.
@@ -121,6 +137,7 @@ import from `koreader/settings/` for users of the old plugin.
 - `packaging/` — `fetch-runtime.sh` (download release; writes `runtime/.platform`
   used to name artifacts and fill the KPM manifest), `prune.txt` (what gets
   stripped, ordered least→most risky), `build.sh` (stage + prune + zip + kpkg),
+  `build-docker.sh` (the same, in a container, for hosts without zip/python3),
   `run-emulator.sh` (dev loop), `kpkg/` (KPM `manifest.json.in` +
   `install.sh`/`launch.sh`/`uninstall.sh` hooks — `sh`, not bash).
   KPM specifics: `manifest_version: 2`, version as `[maj,min,patch]`,
@@ -147,8 +164,27 @@ import from `koreader/settings/` for users of the old plugin.
   `closeUI()` flushes history, closes the screen and
   calls `UIManager:quit()` — i.e. it QUITS THE APP; every exit path leads here.
   `showSettings()` is where Login/Logout/interval/quit live; it is reached by
-  **tapping the version label** in the bottom-right corner. Nothing else calls
-  it, so if that tap target is ever removed, logout becomes unreachable again.
+  **tapping the version label** in the bottom-right corner. Logout also has a
+  visible **LOGOUT pill** in the bottom bar (`screenbase.lua`), shown only while
+  a token exists and confirmed through `confirmLogout()`; both routes go through
+  `doLogout()`.
+- **Popups must be marked modal, and must not draw icons.** Two traps, both of
+  which silently broke every dialog in the app until the logout button forced
+  them out:
+  1. `UIManager:show` inserts a non-modal widget *below* any modal one. The
+     pages are `modal = true` and fullscreen opaque, so a plain
+     `UIManager:show(dialog)` puts the dialog **underneath** the page — shown,
+     repainted, invisible. `controller.lua`'s `showOver()` sets `modal = true`
+     first; use it for anything popped over a page.
+  2. `InfoMessage` and `ConfirmBox` draw an icon by default → `IconWidget` →
+     `ImageWidget:_loadfile` → `document/documentregistry`, which `prune.txt`
+     strips. They **throw** on the shipped runtime. Use `notify()` (InfoMessage
+     with `show_icon = false`) and `ButtonDialog` instead of `ConfirmBox`. Same
+     reason `roticon.lua` draws its own arrow.
+- **A tap target must be a `FrameContainer`, not a bare `TextWidget`.**
+  `hit()` tests `widget.dimen`, and `TextWidget:paintTo` never assigns it, so a
+  bare TextWidget can never be tapped. The version label was one, which is why
+  the settings dialog had been unreachable.
 - `app/screenbase.lua` — the base every page extends. Owns the fullscreen frame,
   header, bottom bar, navigation, tap/swipe handling and refresh scheduling.
   Subclasses define `rebuild()` and `doFetch()`, may define `setup()` (extra
@@ -157,6 +193,15 @@ import from `koreader/settings/` for users of the old plugin.
   `landscape, base, lw`. Before this existed the three screens carried ~570
   lines of byte-identical copy. `app/theme.lua` holds the palette and metrics,
   `app/fmt.lua` the header/epoch formatting.
+- **Text colours vs structure colours.** In `theme.lua`, `fg`/`active`/`muted`/
+  `faint` are for text; `border`/`rule`/`fill` are for lines and backgrounds and
+  must never be passed as an `fgcolor`. That mistake is why several captions
+  shipped nearly unreadable — e-ink has no backlight and far less usable
+  contrast than the emulator implies, so a grey that merely looks soft on a
+  monitor disappears on the device. Small captions also take `bold = true`,
+  which buys more legibility on e-ink than another shade of grey. When
+  bolding text, re-run the smoke geometry checks: bold is **wider**, and the
+  header, bottom bar and heatmap gutter are all laid out from measured widths.
 - `app/usagescreen.lua` — the dashboard. **`self.modal = true`** (set by the
   base) so the framework skips underlying touch zones and routes all input here.
   `rebuild()` reconstructs `self[1]` from `self.data`, reading **live** Screen
@@ -167,6 +212,36 @@ import from `koreader/settings/` for users of the old plugin.
   by paintTo), NOT fixed fractions.
   `modelsscreen.lua` / `trendscreen.lua` are pages 2 and 3 of the swipe
   carousel; `trendscreen` renders via `chart.lua` over `history.lua`.
+- `app/history.lua` — **two** persisted ring buffers in one settings file:
+  `samples` (5h utilization, every fetch, kept 5h) and `weekly` (7d
+  utilization, throttled to hourly by `MIN_GAP_7D`, kept 7 days). Files written
+  before the weekly series existed have no `weekly` key and must keep loading.
+  Samples are only recorded while a screen is fetching, so the weekly series is
+  sparse — it survives across sessions and fills in over days.
+- `app/heatmap.lua` — the week as a 7×4 grid (a column per day, a row per 6h
+  block), cell darkness = quota consumed in that block. Third state of page 3's
+  tap toggle (`5h → 7d → heat`), reusing the same `weekly` series.
+  **Read the module docstring before trusting a cell.** In short: the stored
+  value is *cumulative* utilization, so a cell is a **derived delta spread over
+  the interval between two samples**, not an observation; shading is **relative
+  to that week's busiest block**; and unmeasured blocks are `nil`, rendered
+  differently from zero, because "idle" and "app was closed" must not look alike.
+  Resolution is 7×4 and not 7×24 **because of the sampling rate, not the
+  layout**: samples only accrue while the app is open, at most one an hour
+  (`MIN_GAP_7D`), so 168 cells could never be filled. The only way to improve
+  the picture is keeping the app open with auto-refresh on — there is no
+  background collection, and adding one would mean shipping a daemon this
+  project deliberately avoids. The screen therefore always prints what the
+  darkest cell is worth and how many blocks were actually measured.
+- `app/burn.lua` — the burn-rate projection behind the trend page's verdict
+  line (two-point slope → ETA vs the window's reset). Extracted from
+  `trendscreen.lua` so both windows can use it. `Burn.PARAMS` is per-window and
+  **must stay split**: the 5h "stable" floor of `0.02/60` per minute is ~29% a
+  day, which would report a draining week as steady, and its 45-min lookback
+  finds no reference sample in an hourly series.
+- Page 3 plots **either** window; tapping the chart toggles. The mode is
+  `controller.trend_mode`, not screen state, because `openPage` builds a fresh
+  screen on every navigation.
 - `app/i18n.lua` — PT/EN. The **msgid is the English text**, so a missing entry
   degrades to English instead of to a key. (An earlier version had the table
   keyed on English while every call site passed Portuguese: it never matched,
