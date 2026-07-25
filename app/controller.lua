@@ -1,5 +1,5 @@
 --[[
-Claude Usage - KOReader plugin
+Claude Usage - app controller (standalone KUAL app)
 Probes api.anthropic.com with max_tokens:1 and reads the
 anthropic-ratelimit-unified-* response headers. Costs ~1 token per refresh.
 
@@ -10,13 +10,11 @@ Auto-refresh: pick 5/10/15/30s. Each tick is one probe (~1 token). Changing the
 interval is rate-limited to once per 2 seconds.
 ]]--
 
-local Dispatcher = require("dispatcher")
 local InfoMessage = require("ui/widget/infomessage")
 local InputDialog = require("ui/widget/inputdialog")
 local UIManager = require("ui/uimanager")
 local LuaSettings = require("luasettings")
 local DataStorage = require("datastorage")
-local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local UsageScreen = require("usagescreen")
 local ModelScreen = require("modelsscreen")
 local TrendScreen = require("trendscreen")
@@ -25,7 +23,6 @@ local LoginModal = require("loginmodal")
 local TokenServer = require("tokenserver")
 local NetworkMgr = require("ui/network/manager")
 local ButtonDialog = require("ui/widget/buttondialog")
-local Event = require("ui/event")
 local Screen = require("device").screen
 local Crypto = require("crypto")
 local ltn12 = require("ltn12")
@@ -50,16 +47,25 @@ local MODELS = {
 local PAGES_IMPL = 3                   -- navigable pages (dashboard, models, 5h trend)
 local DOTS_TOTAL = 4                   -- carousel dots shown (extra = placeholder)
 local INTERVAL_CYCLE = { 0, 5, 10, 15, 30 }
-local ROTA_PORTRAIT  = Screen.DEVICE_ROTATED_UPRIGHT or 0
-local ROTA_LANDSCAPE = Screen.DEVICE_ROTATED_CLOCKWISE or 1
+local ROTA_PORTRAIT = Screen.DEVICE_ROTATED_UPRIGHT or 0
 
-local ClaudeUsage = WidgetContainer:extend{
-    name = "claudeusage",
-    is_doc_only = false,
-}
+local ClaudeUsage = {}
+ClaudeUsage.__index = ClaudeUsage
+
+-- Standalone app: no KOReader plugin host. The controller owns the settings,
+-- the history and whichever screen is currently on the UIManager stack.
+function ClaudeUsage.new()
+    local self = setmetatable({}, ClaudeUsage)
+    self:init()
+    return self
+end
+
+-- App data lives outside the bundled runtime (see bin/claudeusage.sh) so that
+-- replacing runtime/ never destroys the stored token or the history.
+local DATA_DIR = os.getenv("CLAUDEUSAGE_DATA") or DataStorage:getSettingsDir()
 
 function ClaudeUsage:init()
-    self.settings = LuaSettings:open(DataStorage:getSettingsDir() .. "/claudeusage.lua")
+    self.settings = LuaSettings:open(DATA_DIR .. "/claudeusage.lua")
     self.refresh_interval = self.settings:readSetting("refresh_interval") or 0
     self.change_locked = false
     -- Exposed to the screens (page nav + model list).
@@ -69,63 +75,23 @@ function ClaudeUsage:init()
     self._probe_idx = 0
     self._model_results = {}
     self._incidents = nil
-    self.history = History.new(DataStorage:getSettingsDir() .. "/claudeusage_history.lua")
-    -- Global rotation state (restored on closeUI) + current open screen.
-    self.rotate_landscape = false
-    self.orig_rotation = nil
+    self.history = History.new(DATA_DIR .. "/claudeusage_history.lua")
+    -- Rotation is a KOReader screen mode: 0 portrait, 1 landscape,
+    -- 2 portrait upside down, 3 landscape upside down. Remembered across runs.
+    self.rotation_mode = self.settings:readSetting("rotation_mode") or ROTA_PORTRAIT
     self.cur_screen = nil
     -- Stable callback ref so UIManager:unschedule works.
     self.unlock_task = function() self.change_locked = false end
-
-    self:onDispatcherRegisterActions()
-    self.ui.menu:registerToMainMenu(self)
 end
 
-function ClaudeUsage:onDispatcherRegisterActions()
-    Dispatcher:registerAction("claudeusage_show", {
-        category = "none",
-        event = "ClaudeUsageShow",
-        title = T("Show Claude usage"),
-        general = true,
-    })
-end
-
-function ClaudeUsage:addToMainMenu(menu_items)
-    menu_items.claudeusage = {
-        text = "Claude Usage",
-        sorting_hint = "tools",
-        sub_item_table = {
-            {
-                text = T("Show usage"),
-                keep_menu_open = true,
-                enabled_func = function() return self:hasToken() end,
-                callback = function() self:showUsage() end,
-            },
-            {
-                text = T("Models"),
-                keep_menu_open = true,
-                enabled_func = function() return self:hasToken() end,
-                callback = function() self:showModels() end,
-            },
-            {
-                text = T("Janela de 5h"),
-                keep_menu_open = true,
-                enabled_func = function() return self:hasToken() end,
-                callback = function() self:showTrend() end,
-            },
-            {
-                text = T("Login (web)"),
-                keep_menu_open = true,
-                callback = function() self:webLogin() end,
-            },
-            {
-                text = T("Logout (clear token)"),
-                keep_menu_open = true,
-                enabled_func = function() return self:hasToken() end,
-                callback = function() self:logout() end,
-            },
-        },
-    }
+-- App entry point, called by app.lua before UIManager:run(). Something must be
+-- on the stack before the loop starts, otherwise UIManager exits immediately.
+function ClaudeUsage:start()
+    if not self:hasToken() then
+        self:webLogin()
+    else
+        self:showUsage()
+    end
 end
 
 function ClaudeUsage:hasToken()
@@ -215,9 +181,14 @@ end
 -- against stacking (also called automatically by UsageScreen on token expiry).
 function ClaudeUsage:webLogin()
     if self.login_open then return end
-    if NetworkMgr and NetworkMgr.isConnected and not NetworkMgr:isConnected() then
-        UIManager:show(InfoMessage:new{ text = T("Connect the Kindle to WiFi first.") })
-        return
+    -- NetworkMgr is a KOReader-app service; outside its usual host it may throw.
+    -- Only block on a *definite* "not connected" answer, never on an error.
+    if NetworkMgr and NetworkMgr.isConnected then
+        local ok, connected = pcall(function() return NetworkMgr:isConnected() end)
+        if ok and not connected then
+            UIManager:show(InfoMessage:new{ text = T("Connect the Kindle to WiFi first.") })
+            return
+        end
     end
     local ip = TokenServer.get_ip()
     if not ip then
@@ -246,11 +217,6 @@ function ClaudeUsage:probeToken(tok)
     return h ~= nil and not auth
 end
 
-function ClaudeUsage:onClaudeUsageShow()
-    self:showUsage()
-    return true
-end
-
 -- Change the auto-refresh interval, rate-limited to once per CHANGE_COOLDOWN s.
 -- Returns true if the interval actually changed, false if blocked by cooldown.
 function ClaudeUsage:setRefreshInterval(secs)
@@ -268,10 +234,6 @@ function ClaudeUsage:setRefreshInterval(secs)
     self.settings:saveSetting("refresh_interval", secs)
     self.settings:flush()
     return true
-end
-
-function ClaudeUsage:onCloseWidget()
-    UIManager:unschedule(self.unlock_task)
 end
 
 -- Fetch usage. Uses `arg_token` if given, else the unlocked session token.
@@ -445,22 +407,22 @@ function ClaudeUsage:recordSample(v)
     if v then self.history:push(os.time(), v) end
 end
 
--- Capture the device rotation the first time we enter the plugin UI.
-function ClaudeUsage:enterUI()
-    if self.orig_rotation == nil then
-        self.orig_rotation = Screen:getRotationMode()
-    end
-end
-
--- Apply the plugin's rotation choice to the device (affects all pages).
+-- Apply the app's rotation choice to the device (affects all pages).
+-- Standalone: there is no reader view to handle a SetRotationMode event, so we
+-- drive the Screen directly and force a full repaint.
 function ClaudeUsage:applyRotation()
-    local target = self.rotate_landscape and ROTA_LANDSCAPE or ROTA_PORTRAIT
-    UIManager:broadcastEvent(Event:new("SetRotationMode", target))
+    if Screen:getRotationMode() ~= self.rotation_mode then
+        Screen:setRotationMode(self.rotation_mode)
+    end
+    UIManager:setDirty("all", "full")
 end
 
--- Toggle/set landscape; re-lay the current screen.
-function ClaudeUsage:setRotationLandscape(landscape)
-    self.rotate_landscape = landscape and true or false
+-- Quarter turn per tap, all the way around: portrait -> landscape ->
+-- portrait upside down -> landscape upside down -> portrait.
+function ClaudeUsage:cycleRotation()
+    self.rotation_mode = (self.rotation_mode + 1) % 4
+    self.settings:saveSetting("rotation_mode", self.rotation_mode)
+    self.settings:flush()
     self:applyRotation()
     if self.cur_screen then self.cur_screen:rebuild() end
 end
@@ -478,17 +440,16 @@ function ClaudeUsage:cycleInterval()
     end
 end
 
--- Fully close the plugin UI: restore the original device rotation.
+-- Quit the app: persist, tear down the screen, stop the UIManager loop so
+-- app.lua can run Device:exit() and hand control back to KUAL.
 function ClaudeUsage:closeUI()
     self.history:flush()   -- persist any samples held back by the throttle
-    if self.orig_rotation ~= nil then
-        UIManager:broadcastEvent(Event:new("SetRotationMode", self.orig_rotation))
-        self.orig_rotation = nil
-    end
+    UIManager:unschedule(self.unlock_task)
     if self.cur_screen then
         UIManager:close(self.cur_screen)
         self.cur_screen = nil
     end
+    UIManager:quit()
 end
 
 -- Settings dialog (gear icon): rotation, refresh interval, close app.
@@ -510,18 +471,36 @@ function ClaudeUsage:showSettings()
             end,
         })
     end
+    -- Standalone app: this dialog replaces the KOReader plugin menu, so the
+    -- account actions that used to live there hang off it now.
+    local account_row = {}
+    if self:hasToken() then
+        table.insert(account_row, {
+            text = T("Logout (clear token)"),
+            callback = function()
+                close_dlg()
+                self:logout()
+                if self.cur_screen then
+                    UIManager:close(self.cur_screen)
+                    self.cur_screen = nil
+                end
+                self:webLogin()   -- back to the login modal, app stays alive
+            end,
+        })
+    else
+        table.insert(account_row, {
+            text = T("Login (web)"),
+            callback = function() close_dlg(); self:webLogin() end,
+        })
+    end
+
     dlg = ButtonDialog:new{
         title = T("Configuracoes"),
         title_align = "center",
         buttons = {
-            {{
-                text = self.rotate_landscape and T("Girar: Retrato") or T("Girar: Paisagem"),
-                callback = function()
-                    close_dlg()
-                    self:setRotationLandscape(not self.rotate_landscape)
-                end,
-            }},
+            -- Rotation lives on the screen itself now (the arrow button).
             interval_row,
+            account_row,
             {{
                 text = T("Fechar app"),
                 callback = function() close_dlg(); self:closeUI() end,
@@ -534,7 +513,10 @@ end
 -- Show a page by index (1 = dashboard, 2 = models, 3 = 5h trend). Assumes unlocked.
 function ClaudeUsage:openPage(idx)
     if idx < 1 or idx > PAGES_IMPL then return end
-    self:enterUI()
+    if self.cur_screen then
+        UIManager:close(self.cur_screen)
+        self.cur_screen = nil
+    end
     local ScreenCls = (idx == 2) and ModelScreen
                    or (idx == 3) and TrendScreen
                    or UsageScreen

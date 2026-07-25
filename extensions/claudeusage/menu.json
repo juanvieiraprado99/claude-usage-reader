@@ -1,0 +1,13 @@
+{
+	"items": [
+	{
+		"name": "Claude Usage",
+		"priority": 1,
+		"action": "./bin/claudeusage.sh",
+		"exitmenu": true,
+		"refresh": true,
+		"status": false,
+		"internal": "status Show Claude Code rate-limit usage"
+	}
+	]
+}

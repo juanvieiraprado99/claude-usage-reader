@@ -1,0 +1,152 @@
+name: release
+
+# Every push to main publishes a release with ready-to-install packages for both
+# Kindle platforms. Nothing is compiled here: the build downloads the pinned
+# KOReader release (packaging/KOREADER_VERSION), prunes it and repackages it
+# together with app/.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+
+  # Boot the app headless against the Linux build of the same KOReader release,
+  # with prune.txt applied, so a broken boot or an over-aggressive prune never
+  # reaches a release. Same idea as packaging/run-docker.sh, minus Docker.
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch the Linux runtime
+        run: |
+          KOVER="$(cat packaging/KOREADER_VERSION)"
+          curl -fL -o ko-linux.tar.xz \
+            "https://github.com/koreader/koreader/releases/download/${KOVER}/koreader-linux-x86_64-${KOVER}.tar.xz"
+          mkdir -p ko && tar -xJf ko-linux.tar.xz -C ko
+
+      - name: Prune it like the shipped runtime
+        run: |
+          EMU="$(dirname "$(find ko -maxdepth 4 -name luajit -type f | head -n1)")"
+          echo "EMU=$EMU" >>"$GITHUB_ENV"
+          before=$(du -sm "$EMU" | cut -f1)
+          while IFS= read -r line; do
+              case "$line" in ''|\#*) continue ;; esac
+              rm -rf $EMU/$line
+          done < packaging/prune.txt
+          echo "runtime ${before}M -> $(du -sm "$EMU" | cut -f1)M"
+
+      - name: Boot the app
+        run: |
+          # The runtime ships its own libSDL3, so no system SDL is needed.
+          export LD_LIBRARY_PATH="$EMU/libs:$EMU:${LD_LIBRARY_PATH:-}"
+          export LUA_PATH="$PWD/app/?.lua;$EMU/frontend/?.lua;$EMU/?.lua;;"
+          export LUA_CPATH="$EMU/libs/?.so;;"
+          export CLAUDEUSAGE_DATA="$PWD/.smoke-data"
+          export SDL_VIDEODRIVER=dummy
+          export EMULATE_READER_W=758 EMULATE_READER_H=1024 EMULATE_READER_DPI=212
+          mkdir -p "$CLAUDEUSAGE_DATA"
+          ( cd "$EMU" && timeout 25 ./luajit "$GITHUB_WORKSPACE/app/app.lua" ) >smoke.log 2>&1 || true
+          tail -40 smoke.log
+          if grep -qE "stack traceback|claudeusage crashed" smoke.log; then
+              echo "::error::the app crashed during startup"
+              exit 1
+          fi
+          # A silent runtime is also wrong: the device line proves it got far
+          # enough to initialise the screen.
+          grep -q "initializing for device" smoke.log || {
+              echo "::error::the app never reached device initialisation"
+              exit 1
+          }
+
+  build:
+    needs: smoke
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [kindlepw2, kindlehf]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build ${{ matrix.platform }}
+        run: |
+          ./packaging/fetch-runtime.sh "$(cat packaging/KOREADER_VERSION)" "${{ matrix.platform }}"
+          APP_VERSION="$(cat VERSION).${{ github.run_number }}" ./packaging/build.sh
+
+      # Guards against a silently mismatched runtime: a package whose luajit
+      # wants an interpreter the target device lacks fails with a bare
+      # "./luajit: not found".
+      - name: Check the ELF interpreter matches the platform
+        run: |
+          loader="$(grep -ao '/lib/ld-linux[a-z0-9.-]*' dist/claudeusage/runtime/luajit | head -n1)"
+          echo "${{ matrix.platform }} -> $loader"
+          case "${{ matrix.platform }}:$loader" in
+            kindlehf:/lib/ld-linux-armhf.so.3) ;;
+            kindlepw2:/lib/ld-linux.so.3) ;;
+            *) echo "::error::unexpected loader $loader for ${{ matrix.platform }}"; exit 1 ;;
+          esac
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages-${{ matrix.platform }}
+          path: |
+            dist/*.zip
+            dist/*.kpkg
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: ${{ !contains(github.event.head_commit.message, '[skip ci]') }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="$(cat VERSION).${{ github.run_number }}"
+          KOVER="$(cat packaging/KOREADER_VERSION)"
+          ls -lh artifacts
+          cat >notes.md <<EOF
+          Claude Code rate-limit usage on a jailbroken Kindle.
+
+          ### Which file do I want?
+
+          | Arquivo | Kindle |
+          | --- | --- |
+          | \`claudeusage-${VERSION}-kindlepw2.zip\` | Paperwhite 2/3, Voyage, Oasis 1, básicos 7ª/8ª gen |
+          | \`claudeusage-${VERSION}-kindlehf.zip\` | modelos modernos (PW4/PW5, Oasis 3, Scribe, básicos 10ª/11ª gen) |
+
+          Unzip into \`/mnt/us/extensions/\` and open KUAL. The \`.kpkg\` files are the
+          same packages for KPM (\`;kpm install claudeusage\` once served from a repo).
+
+          Picked the wrong one? \`crash.log\` says \`./luajit: not found\` — that is the
+          missing ELF interpreter, not a missing file. Grab the other build.
+
+          Bundled KOReader runtime: ${KOVER}.
+          Commit: ${{ github.sha }}
+          EOF
+          gh release create "v${VERSION}" artifacts/* \
+            --title "v${VERSION}" \
+            --notes-file notes.md \
+            --latest

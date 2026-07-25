@@ -1,0 +1,8 @@
+# Bundled KOReader runtime: fetched by packaging/fetch-runtime.sh, shipped only
+# inside release zips. Too large to version here.
+/runtime/
+/.runtime-tmp/
+/dist/
+packaging/.kpm-helper.py
+/.emulator-data/
+/.docker-smoke/

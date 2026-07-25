@@ -1,0 +1,56 @@
+# Paths removed from the bundled KOReader runtime, relative to runtime/.
+# Blank lines and # comments ignored. Globs are expanded by the shell.
+#
+# ORDER MATTERS FOR DEBUGGING: the entries are grouped from "certainly unused"
+# to "verify on device". If the app stops booting after a runtime bump, comment
+# out the last group first and work upwards.
+#
+# The app only ever requires: ui/widget/*, ui/uimanager, ui/gesturerange,
+# ui/geometry, ui/font, ffi/blitbuffer, ui/network/manager, luasettings,
+# datastorage, plus luasocket/luasec/ltn12.
+
+# --- document engines -------------------------------------------------------
+# Only the three that nothing outside a document view can reach. Be very
+# conservative here: the whole libs/ directory is ~10MB, while fonts and data
+# below are where the real savings are, and a missing .so is a hard crash at
+# startup. Notably KEPT:
+#   libzstd      - libarchive links it, and device/generic/device.lua loads
+#                  ffi/archiver at require time. Removing it broke boot.
+#   libwrap-mupdf - ui/renderimage lazily falls back to it from ImageWidget.
+#   libkoreader-nnsvg, liblodepng - image decoding paths under ImageWidget.
+libs/libk2pdfopt*
+libs/libkoreader-djvu*
+libs/libkoreader-cre*
+
+# --- KOReader features the app never opens ---------------------------------
+plugins
+data/dict
+data/hyph
+data/cr3.css
+data/*.css
+data/tessdata
+data/covers
+l10n
+history
+clipboard
+screenshots
+spec
+
+# --- fonts: the app only asks for Font:getFace("cfont", ...) ---------------
+# Noto Sans (regular/bold) covers it; CJK and the display faces are dead weight.
+fonts/noto/NotoSansCJK*
+fonts/noto/NotoSerif*
+fonts/nerdfonts
+fonts/droid
+fonts/freefont
+fonts/cjkfonts
+
+# --- verify on device before trusting these --------------------------------
+# Reader frontends. Some widgets pull helpers from here indirectly, so re-test
+# the whole app (all three pages + login modal) after enabling.
+# frontend/document can go because app.lua preloads a CanvasContext stub - the
+# real one requires ffi/mupdf, which is why libmupdf must stay pruned too.
+frontend/apps/reader
+frontend/document
+frontend/apps/cloudstorage
+frontend/apps/opdscatalog

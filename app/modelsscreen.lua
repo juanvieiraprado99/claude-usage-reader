@@ -24,7 +24,7 @@ local VerticalSpan = require("ui/widget/verticalspan")
 local HorizontalSpan = require("ui/widget/horizontalspan")
 local TextWidget = require("ui/widget/textwidget")
 local LineWidget = require("ui/widget/linewidget")
-local IconWidget = require("ui/widget/iconwidget")
+local RotIcon = require("roticon")
 local GestureRange = require("ui/gesturerange")
 local Blitbuffer = require("ffi/blitbuffer")
 local Geom = require("ui/geometry")
@@ -64,6 +64,18 @@ local function pill(text, bg, fg, border)
     }
 end
 
+-- Same shell as pill(), with the circular-arrow icon instead of a label: one
+-- tap = a quarter turn.
+local function rotPill()
+    local bg = Blitbuffer.Color8(0xF4)
+    return FrameContainer:new{
+        bordersize = sb(1), radius = sb(12), padding = sb(6), margin = 0,
+        bordercolor = Blitbuffer.Color8(0x88),
+        background = bg,
+        RotIcon.makeWidget(sb(18), Blitbuffer.Color8(0x22), bg),
+    }
+end
+
 -- Map a probe result -> pill widget (text + grayscale severity colors).
 local function modelChip(res)
     local code = res and res.code
@@ -90,8 +102,6 @@ end
 function ModelScreen:init()
     self.modal = true
     self.dimen = Geom:new{ x = 0, y = 0, w = Screen:getWidth(), h = Screen:getHeight() }
-    self.orig_rotation = Screen:getRotationMode()
-    self.rotated = false
     self._disposables = {}
     self.settings_btn = nil
 
@@ -134,11 +144,8 @@ function ModelScreen:onTap(a, b)
     if self.refresh_btn and inside(expand(self.refresh_btn.dimen, m), pos) then
         self.plugin:cycleInterval(); return true
     end
-    if self.rot_p and inside(expand(self.rot_p.dimen, m), pos) then
-        self.plugin:setRotationLandscape(false); return true
-    end
-    if self.rot_l and inside(expand(self.rot_l.dimen, m), pos) then
-        self.plugin:setRotationLandscape(true); return true
+    if self.rot_btn and inside(expand(self.rot_btn.dimen, m), pos) then
+        self.plugin:cycleRotation(); return true
     end
     for i, btn in ipairs(self.nav_btns or {}) do
         if i ~= self.page_idx and inside(expand(btn.dimen, m), pos) then
@@ -222,21 +229,21 @@ function ModelScreen:makeNav(active)
     return grp
 end
 
--- Bottom bar: rotate buttons in each corner + centered navigation.
+-- Bottom bar: rotate button on the left, centered navigation. An empty span
+-- mirrors the button on the right so the nav stays visually centered.
 function ModelScreen:makeBottomBar(active)
     local nav = self:makeNav(active)
-    self.rot_p = pill(T("RETRATO"), Blitbuffer.Color8(0xF4))
-    self.rot_l = pill(T("PAISAGEM"), Blitbuffer.Color8(0xF4))
+    self.rot_btn = rotPill()
+    local bw = self.rot_btn:getSize().w
     local lw = self.width - 2 * sb(16)
-    local sp = math.max(sb(8), math.floor(
-        (lw - self.rot_p:getSize().w - self.rot_l:getSize().w - nav:getSize().w) / 2))
+    local sp = math.max(sb(8), math.floor((lw - 2 * bw - nav:getSize().w) / 2))
     return HorizontalGroup:new{
         align = "center",
-        self.rot_p,
+        self.rot_btn,
         HorizontalSpan:new{ width = sp },
         nav,
         HorizontalSpan:new{ width = sp },
-        self.rot_l,
+        HorizontalSpan:new{ width = bw },
     }
 end
 
