@@ -196,17 +196,58 @@ local function render(g, scale, bg)
     return bb
 end
 
+-- Rasters are cached: the mascot only has a handful of distinct appearances, but
+-- an animation frame used to redraw one from scratch every 120-300ms, and at the
+-- dashboard's scale that is ~160k pixels each time.
+--
+-- The cache owns the buffers, so the widgets it hands out are NOT disposable -
+-- freeing one would leave the cache holding a dangling buffer.
+local cache = {}
+local cache_order = {}
+local CACHE_MAX = 12   -- ~2MB at the largest scale we ever ask for
+
+Clawd.raster_count = 0   -- rasterisations actually performed (the smoke test reads it)
+
+local function cached(key, build)
+    local bb = cache[key]
+    if bb then return bb end
+    bb = build()
+    Clawd.raster_count = Clawd.raster_count + 1
+    if #cache_order >= CACHE_MAX then
+        local oldest = table.remove(cache_order, 1)
+        if cache[oldest] then cache[oldest]:free() end
+        cache[oldest] = nil
+    end
+    cache[key] = bb
+    cache_order[#cache_order + 1] = key
+    return bb
+end
+
 -- Public: opts = { anim = "blink"|"shy"|"heart"|"sparkle"|nil, phase = n }
 function Clawd.makeWidget(emotion, scale, opts, bg)
     scale = scale or 10
     opts = opts or {}
-    local bb = render(buildGrid(emotion, opts.anim, opts.phase), scale, bg)
+    local key = table.concat({ emotion or "-", opts.anim or "-",
+                               opts.phase or 0, scale,
+                               bg and bg.a or "w" }, "|")
+    local bb = cached(key, function()
+        return render(buildGrid(emotion, opts.anim, opts.phase), scale, bg)
+    end)
     return ImageWidget:new{
         image = bb,
-        image_disposable = true,
+        image_disposable = false,
         width = W * scale,
         height = H * scale,
     }
+end
+
+-- Drop every cached raster. Called when the scale changes (rotation), where the
+-- old buffers are all dead weight.
+function Clawd.clearCache()
+    for _, key in ipairs(cache_order) do
+        if cache[key] then cache[key]:free() end
+    end
+    cache, cache_order = {}, {}
 end
 
 function Clawd.emotionFor(max_pct, status)

@@ -17,12 +17,11 @@ threaded, so accept is non-blocking and polled via UIManager.
 
 local socket = require("socket")
 local UIManager = require("ui/uimanager")
-local T = require("i18n").t
 
 local TokenServer = {}
 TokenServer.__index = TokenServer
 
-local POLL_EVERY = 0.25
+local POLL_EVERY = 0.5
 
 function TokenServer:new(o)
     o = o or {}
@@ -67,21 +66,21 @@ local function html_escape(s)
         ["&"] = "&amp;", ["<"] = "&lt;", [">"] = "&gt;", ["\""] = "&quot;" }))
 end
 
--- Render the localized form page with an optional pre-filled PIN and message.
+-- Render the form page with an optional pre-filled PIN and message.
 local function form_page(pin, msg)
-    local title = T("Claude Usage — send token")
+    local title = "Claude Usage — enviar token"
     return table.concat({
         "<!doctype html><html><head><meta charset=utf-8>",
         "<meta name=viewport content=\"width=device-width,initial-scale=1\">",
         "<title>", title, "</title>", STYLE, "</head><body>",
         "<h2>", title, "</h2>",
-        "<p><small>", T("On your PC run <code>claude setup-token</code>, copy the <code>sk-ant-oat01-...</code>, paste it below and enter the PIN shown on the Kindle."), "</small></p>",
+        "<p><small>No PC rode <code>claude setup-token</code>, copie o <code>sk-ant-oat01-...</code>, cole abaixo e digite o PIN mostrado no Kindle.</small></p>",
         "<form method=POST action=/save>",
-        "<label>", T("Token"), "</label>",
+        "<label>Token</label>",
         "<textarea name=token rows=4 placeholder=\"sk-ant-oat01-...\"></textarea>",
-        "<label>", T("PIN (4 digits)"), "</label>",
+        "<label>PIN (4 dígitos)</label>",
         "<input name=pin inputmode=numeric maxlength=4 value=\"", html_escape(pin), "\">",
-        "<button type=submit>", T("Submit"), "</button></form>",
+        "<button type=submit>Enviar</button></form>",
         msg or "", "</body></html>",
     })
 end
@@ -90,7 +89,7 @@ local function ok_page()
     return "<!doctype html><meta charset=utf-8>"
         .. "<body style=\"font-family:sans-serif;text-align:center;margin-top:3rem\">"
         .. "<h2>&#10003;</h2><p>"
-        .. T("Token received. Return to the Kindle; you can close this page.")
+        .. "Token recebido. Volte ao Kindle; pode fechar esta página."
         .. "</p></body>"
 end
 
@@ -157,11 +156,11 @@ function TokenServer:poll()
             local pin = form_field(body, "pin") or ""
             if pin ~= tostring(self.pin) then
                 client:send(http_response("200 OK",
-                    form_page(pin, "<p style='color:#b00'>" .. T("Wrong PIN.") .. "</p>")))
+                    form_page(pin, "<p style='color:#b00'>PIN incorreto.</p>")))
                 client:close()
             elseif token == "" then
                 client:send(http_response("200 OK",
-                    form_page(pin, "<p style='color:#b00'>" .. T("Empty token.") .. "</p>")))
+                    form_page(pin, "<p style='color:#b00'>Token vazio.</p>")))
                 client:close()
             else
                 client:send(http_response("200 OK", ok_page()))

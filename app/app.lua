@@ -24,6 +24,11 @@ G_reader_settings = require("luasettings"):open(
 
 -- `frontend/device.lua` probes the hardware and calls `dev:init()` itself, so
 -- requiring it is enough - do NOT init again (see runtime/reader.lua).
+-- Every request runs on the UI thread, so without this a server that accepts
+-- the connection and then goes quiet freezes the whole app until LuaSocket's
+-- own (much longer) default gives up. ssl.https reads this value too.
+require("socket.http").TIMEOUT = 10
+
 local Device = require("device")
 
 -- `ui/font` -> `fontlist` asks CanvasContext for two device capabilities while

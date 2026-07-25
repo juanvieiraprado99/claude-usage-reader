@@ -13,13 +13,14 @@ local ImageWidget = require("ui/widget/imagewidget")
 
 local RotIcon = {}
 
+-- One raster per (size, colors), kept forever: there are at most a couple, and
+-- the draw below is a per-pixel loop with a sqrt and an atan2 in it, which used
+-- to run on every rebuild of all three screens.
+local cache = {}
+
 -- A thick ring with a slice missing in the upper right, and a solid arrowhead
 -- pointing out of that gap. Grayscale only - the device has no color.
-function RotIcon.makeWidget(size, fg, bg)
-    size = math.max(8, math.floor(size or 18))
-    fg = fg or Blitbuffer.COLOR_BLACK
-    bg = bg or Blitbuffer.COLOR_WHITE
-
+local function render(size, fg, bg)
     local bb = Blitbuffer.new(size, size, Blitbuffer.TYPE_BB8)
     bb:fill(bg)
 
@@ -62,9 +63,24 @@ function RotIcon.makeWidget(size, fg, bg)
         end
     end
 
+    return bb
+end
+
+-- The cache owns the buffer, so the widget must not free it.
+function RotIcon.makeWidget(size, fg, bg)
+    size = math.max(8, math.floor(size or 18))
+    fg = fg or Blitbuffer.COLOR_BLACK
+    bg = bg or Blitbuffer.COLOR_WHITE
+
+    local key = table.concat({ size, fg.a or "-", bg.a or "-" }, "|")
+    local bb = cache[key]
+    if not bb then
+        bb = render(size, fg, bg)
+        cache[key] = bb
+    end
     return ImageWidget:new{
         image = bb,
-        image_disposable = true,
+        image_disposable = false,
         width = size,
         height = size,
     }

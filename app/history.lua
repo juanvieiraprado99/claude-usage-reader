@@ -15,6 +15,7 @@ local MAX = 160             -- hard cap on stored samples
 
 local History = {}
 History.__index = History
+History.WINDOW = WINDOW     -- the trend screen plots exactly this span
 
 local FLUSH_EVERY = 60      -- max one flash write per minute (e-ink flash wear)
 
@@ -22,7 +23,9 @@ function History.new(path)
     local self = setmetatable({}, History)
     self.settings = LuaSettings:open(path)
     self.samples = self.settings:readSetting("samples") or {}
-    self._last_flush = 0
+    -- Start the throttle now, not at the epoch: otherwise the very first push
+    -- always writes to flash.
+    self._last_flush = os.time()
     return self
 end
 
@@ -51,7 +54,10 @@ function History:push(t, v)
     t = t or os.time()
     self.samples[#self.samples + 1] = { t = t, v = v }
     self:_prune(t)
-    if t - self._last_flush >= FLUSH_EVERY then
+    -- A clock that jumps backwards (the Kindle syncs time on wake) would
+    -- otherwise stop flushing forever.
+    local since = t - self._last_flush
+    if since >= FLUSH_EVERY or since < 0 then
         self:flush()
     end
 end

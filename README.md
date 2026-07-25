@@ -64,8 +64,9 @@ The fullscreen dashboard (grayscale — Kindle e-ink has no color) shows:
   `love` (< 50 %), `neutral` (50–75 %), `strain` (75–90 %), `dizzy` (≥ 90 % or rejected).
   Random occasional animations: `blink`, `shy`, `heart`, `sparkle`.
 - **Status pill** — `OK` / `WARNING` / `LIMITED` depending on the API response.
-- **Auto-refresh** — configurable interval (Off / 5 / 10 / 15 / 30 s), tappable label to cycle.
-- **Rotation** — tap "Rotate" to flip between portrait and landscape (Kindle has no rotation sensor).
+- **Auto-refresh** — configurable interval (Off / 10 / 30 / 60 / 300 s), tappable label to cycle.
+- **Rotation** — the circular-arrow button turns the screen 90° per tap, through all four
+  orientations (the Kindle has no rotation sensor). The choice is remembered.
 - **Auto-login** — if the token expires while the dashboard is open, the QR login modal pops
   automatically.
 
@@ -148,7 +149,8 @@ users pass to `;kpm add-repo`.
 ### 3. Login via QR code
 
 1. Launch **Claude Usage** from KUAL. With no token stored it opens the login screen directly
-   (later you can reach it from the gear icon → **Login (web)**).
+   (later you can reach it by tapping the **version label** in the bottom-right corner →
+   **Login (web)**).
 2. A modal shows a **QR code**, the URL `http://<ip>:8099/?k=<PIN>`, and the PIN.
 3. **Scan the QR** with a phone on the **same WiFi** — the form opens with the PIN pre-filled.
 4. Paste the `sk-ant-oat01-…` token and submit.
@@ -165,8 +167,8 @@ that PIN once to unlock (cached in RAM while the app is open).
 ### 5. Use it
 
 Launching **Claude Usage** from KUAL goes straight to the dashboard after the PIN. Swipe between
-the three pages (dashboard, models, 5h trend); the gear icon holds rotation, refresh interval,
-**Logout** and **Fechar app**.
+the three pages (dashboard, models, 5h trend). Tapping the **version label** in the bottom-right
+corner opens the settings dialog: refresh interval, **Logout** and **Fechar app**.
 
 - **Logout (clear token)** wipes the stored token (e.g. before lending the device).
 - There is **no bundled token** — each user logs in with their own account.
@@ -190,19 +192,24 @@ the three pages (dashboard, models, 5h trend); the gear icon holds rotation, ref
 app/
   app.lua            Entry point — boots the runtime, runs the UIManager loop
   controller.lua     App controller — fetch, PIN prompt, pages, settings, token lifecycle
-  usagescreen.lua    Fullscreen dashboard — cards, mascot, auto-refresh, gestures, rotation
+  screenbase.lua     Shared page: frame, header, nav, gestures, refresh scheduling
+  theme.lua          Grayscale palette and metrics
+  fmt.lua            Header/epoch formatting helpers
+  usagescreen.lua    Fullscreen dashboard — cards, mascot, auto-refresh, gestures
   modelsscreen.lua   Per-model probe page (latency + status)
   trendscreen.lua    5h-window trend page
   chart.lua          Trend chart drawn into a Blitbuffer
   history.lua        Rolling 5h-utilization samples on disk
   clawd.lua          Clawd mascot as Lua pixel-art (28×24 grid, procedural geometry)
+  roticon.lua        Rotate arrow, drawn into a Blitbuffer
+  appversion.lua     Version string, replaced by the build
   crypto.lua         Token encryption at rest (ChaCha20 + iterated SHA-256 KDF)
   sha256.lua         SHA-256 implementation for LuaJIT (self-tested vs FIPS vectors)
   chacha20.lua       ChaCha20 stream cipher for LuaJIT (self-tested vs RFC 8439 vectors)
   tokenserver.lua    Transient LAN HTTP receiver for the token form (luasocket)
   loginmodal.lua     QR code modal — owns TokenServer, rotates PIN/URL/QR every 5 min
-  i18n.lua           Gettext wrapper for UI strings
 extensions/claudeusage/
+  config.xml         Extension manifest — without it KUAL ignores the folder
   menu.json          KUAL menu entry
   bin/claudeusage.sh Launcher — framework handling, env, settings import
 packaging/
@@ -228,7 +235,8 @@ packaging/
 | Max wrong PIN attempts            | `controller.lua` — `MAX_FAILS` (8)                        |
 | Bundled runtime version           | `packaging/fetch-runtime.sh` — `VERSION`, `PLATFORM`      |
 | QR rotation interval              | `loginmodal.lua` — `ROTATE_EVERY` (300 s)                 |
-| Auto-refresh intervals            | `controller.lua` — `INTERVAL_CYCLE` ({0, 5, 10, 15, 30})  |
+| Auto-refresh intervals            | `controller.lua` — `INTERVAL_CYCLE` ({0, 10, 30, 60, 300}) |
+| Colors and spacing                | `theme.lua`                                               |
 
 ---
 

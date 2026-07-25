@@ -75,7 +75,8 @@ function Chart.makeWidget(opts)
 
     local span = (opts.win_end or 0) - (opts.win_start or 0)
     if span <= 0 then span = 1 end
-    local function px(t) return (t - opts.win_start) / span * (w - 1) end
+    local win_start = opts.win_start or 0
+    local function px(t) return (t - win_start) / span * (w - 1) end
     local function py(v) return (1 - math.max(0, math.min(1, v))) * (h - 1) end
 
     -- Grid lines at 25 / 50 / 75%

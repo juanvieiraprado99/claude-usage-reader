@@ -24,7 +24,6 @@ local Font = require("ui/font")
 local UIManager = require("ui/uimanager")
 local Screen = require("device").screen
 local TokenServer = require("tokenserver")
-local T = require("i18n").t
 
 local ROTATE_EVERY = 300     -- seconds; PIN/URL/QR lifetime
 
@@ -87,7 +86,7 @@ function LoginModal:build()
         bordercolor = Blitbuffer.Color8(0x88),
         VerticalGroup:new{
             align = "center",
-            TextWidget:new{ text = T("Login — scan on your phone"), face = face(18), bold = true },
+            TextWidget:new{ text = "Login — escaneie no celular", face = face(18), bold = true },
             VerticalSpan:new{ width = sb(14) },
             self.qr,
             VerticalSpan:new{ width = sb(14) },
@@ -96,10 +95,10 @@ function LoginModal:build()
             VerticalSpan:new{ width = sb(8) },
             TextWidget:new{ text = "PIN: " .. self.pin, face = face(30), bold = true },
             VerticalSpan:new{ width = sb(6) },
-            TextWidget:new{ text = T("paste the 'claude setup-token' value"),
+            TextWidget:new{ text = "cole o valor do 'claude setup-token'",
                             face = face(12), fgcolor = Blitbuffer.Color8(0x77) },
             VerticalSpan:new{ width = sb(4) },
-            TextWidget:new{ text = T("expires in 5 min • tap to cancel"),
+            TextWidget:new{ text = "expira em 5 min • toque para cancelar",
                             face = face(12), fgcolor = Blitbuffer.Color8(0x77) },
         },
     }

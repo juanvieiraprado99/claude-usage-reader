@@ -95,5 +95,32 @@ local screen = app.cur_screen
 check("rotate button built", screen ~= nil and screen.rot_btn ~= nil)
 check("version label is a string", type(require("appversion")) == "string")
 
+-- The settings dialog is the only way to reach login/logout, and it went
+-- unreachable once already because nothing called it.
+try("settings dialog opens", function() app:showSettings() end)
+check("settings dialog on screen", #UIManager._window_stack > 1)
+
+-- fetch() must report failure as (nil, message), never as a truthy result: a
+-- non-200 sneaking through renders as a silent "--%".
+do
+    local h, err = app:fetch("sk-ant-oat01-definitely-not-valid")
+    check("fetch reports failure", h == nil and type(err) == "string", err)
+end
+
+-- Rasters are cached, so redrawing the same mascot must not re-rasterise.
+do
+    local Clawd = require("clawd")
+    app:openPage(1)
+    UIManager:_repaint()
+    local before = Clawd.raster_count
+    for _ = 1, 5 do
+        app.cur_screen:rebuild()
+        UIManager:_repaint()
+    end
+    local drawn = Clawd.raster_count - before
+    check("mascot raster cached across rebuilds (" .. drawn .. " draws for 5 rebuilds)",
+          drawn == 0, drawn)
+end
+
 print(failures == 0 and "SMOKE OK" or ("SMOKE FAILED (" .. failures .. ")"))
 os.exit(failures == 0 and 0 or 1)

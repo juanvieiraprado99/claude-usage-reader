@@ -131,7 +131,11 @@ import from `koreader/settings/` for users of the old plugin.
 - `app/controller.lua` — plain Lua class (`Controller.new()`), NOT a
   `WidgetContainer`. Opens settings/history, owns the pages, the refresh
   interval and rotation. `start()` picks the first screen (login vs dashboard).
-  `fetch()` does the probe and returns the lowercased headers table.
+  **`fetch()` contract:** `(headers, nil, nil)` on 200, `(nil, message, auth)`
+  on ANYTHING else. Non-200 used to be returned as success, which rendered a
+  rate-limited account as a silent `--%`.
+  `nextRefreshDelay()` applies an exponential backoff after failures (the radio,
+  not the CPU, is what drains the battery), reset by an explicit interval change.
   `setRefreshInterval()` persists the interval (2s cooldown, returns bool).
   `showUsage()` opens the fullscreen `UsageScreen`. No background loop — the
   screen owns the refresh loop while open. `openPage(idx)` closes the previous
@@ -142,24 +146,27 @@ import from `koreader/settings/` for users of the old plugin.
   (standalone: no reader view to receive a `SetRotationMode` event).
   `closeUI()` flushes history, closes the screen and
   calls `UIManager:quit()` — i.e. it QUITS THE APP; every exit path leads here.
-  `showSettings()` (the gear dialog) is the only entry point for what used to be
-  the KOReader menu: rotation, interval, Login/Logout, Fechar app.
-- `app/usagescreen.lua` — `InputContainer` fullscreen dashboard.
-  **`self.modal = true`** so the framework skips underlying touch zones and routes
-  all input here (without it the screen traps taps). `rebuild()` reconstructs
-  `self[1]` from `self.data` each fetch/anim frame, reading **live** Screen dims
-  (portrait vs landscape branch), then `setDirty(self,"ui")`. Owns the auto-refresh
-  loop (`doFetch`) and a **random** animation scheduler (`scheduleNextAnim` →
-  `pickAnim` weighted by usage → `playRandomAnim`). Tap targets are the real
-  `close_btn` / `refresh_btn` / `rot_btn` / `nav_btns` FrameContainers —
-  hit-tested via their `.dimen` (set by paintTo), NOT fixed fractions.
-  `rot_btn` → `plugin:cycleRotation()`; `onClose` → `plugin:closeUI()` quits.
-  Frees Clawd Blitbuffers each rebuild via `self._disposables`.
-  `modelsscreen.lua` / `trendscreen.lua` follow the same shape (page 2 and 3 of
-  the swipe carousel); `trendscreen` renders via `chart.lua` over `history.lua`.
-  `pill()`, `rotPill()`, `makeNav()`, `makeBottomBar()`, `onTap`/`onSwipe` and
-  `_screenFrame()` are near-identical copies in all three files — a change to
-  one usually has to be made three times.
+  `showSettings()` is where Login/Logout/interval/quit live; it is reached by
+  **tapping the version label** in the bottom-right corner. Nothing else calls
+  it, so if that tap target is ever removed, logout becomes unreachable again.
+- `app/screenbase.lua` — the base every page extends. Owns the fullscreen frame,
+  header, bottom bar, navigation, tap/swipe handling and refresh scheduling.
+  Subclasses define `rebuild()` and `doFetch()`, may define `setup()` (extra
+  state, before the first build) and `onExtraTap(pos, slop)` (page-specific
+  targets). `beginRebuild()` frees the previous frame's buffers and returns
+  `landscape, base, lw`. Before this existed the three screens carried ~570
+  lines of byte-identical copy. `app/theme.lua` holds the palette and metrics,
+  `app/fmt.lua` the header/epoch formatting.
+- `app/usagescreen.lua` — the dashboard. **`self.modal = true`** (set by the
+  base) so the framework skips underlying touch zones and routes all input here.
+  `rebuild()` reconstructs `self[1]` from `self.data`, reading **live** Screen
+  dims (portrait vs landscape branch), then `setDirty(self,"ui")`; passing
+  `anim_only` narrows the repaint to the mascot. Owns a **random** animation
+  scheduler (`scheduleNextAnim` → `pickAnim` weighted by usage → `runAnim`).
+  Tap targets are the real FrameContainers, hit-tested via their `.dimen` (set
+  by paintTo), NOT fixed fractions.
+  `modelsscreen.lua` / `trendscreen.lua` are pages 2 and 3 of the swipe
+  carousel; `trendscreen` renders via `chart.lua` over `history.lua`.
 - `app/appversion.lua` — returns the version string shown in the bottom-right of
   every screen. `packaging/build.sh` overwrites it in the staged package with
   `APP_VERSION`; the copy in the repo stays `"dev"`. **Not** named `version.lua`:
@@ -168,6 +175,12 @@ import from `koreader/settings/` for users of the old plugin.
   Blitbuffer. Deliberately NOT `IconWidget`: rendering KOReader's SVG icons goes
   through `ImageWidget:_loadfile` → `document/documentregistry`, which registers
   crengine/mupdf/djvu — everything the packaged runtime prunes.
+- **Raster caching.** `clawd.lua` and `roticon.lua` cache their Blitbuffers and
+  own them, so their widgets are `image_disposable = false` and must NOT be put
+  in a screen's `_disposables` — freeing one leaves the cache holding a dangling
+  buffer. `Clawd.clearCache()` is called when the scale changes (rotation).
+  Only `chart.lua` stays disposable, since its pixels change with the data.
+  Without this an animation frame re-rasterised ~160k pixels every 120-300ms.
 - `app/crypto.lua` (+ `sha256.lua`, `chacha20.lua`) — token
   encryption at rest. `Crypto.encrypt(token,pin)`/`decrypt(blob,pin)`:
   key = iterated SHA-256(salt..pin), `check = SHA-256(key.."cu-verify")` verifier,
