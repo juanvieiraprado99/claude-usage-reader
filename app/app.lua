@@ -88,12 +88,26 @@ local function watchEmptyStack()
     UIManager:scheduleIn(1, watchEmptyStack)
 end
 
+-- Hold off the stock Kindle screensaver while the app is up - the same lipc
+-- property KOReader's keepalive plugin sets. Both calls live here because
+-- UIManager:run() returning is the one point every exit passes through (clean
+-- quit, empty-stack watchdog, or the xpcall below); restoring it inside the
+-- controller would leak the flag on a crash and leave the screensaver off
+-- until the next reboot.
+local function preventScreensaver(enable)
+    if Device:isKindle() then
+        os.execute("lipc-set-prop com.lab126.powerd preventScreenSaver " .. (enable and 1 or 0))
+    end
+end
+
 local app = Controller.new()
+preventScreensaver(true)
 app:start()
 UIManager:scheduleIn(1, watchEmptyStack)
 
 local ok, err = xpcall(function() UIManager:run() end, debug.traceback)
 
+preventScreensaver(false)
 Device:exit()
 
 if not ok then
