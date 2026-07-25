@@ -1,0 +1,8 @@
+# The Kindle runs these; a CRLF checkout on Windows would ship shell scripts the
+# device's sh chokes on ("\r: not found"). Force LF regardless of core.autocrlf.
+*.sh    text eol=lf
+*.lua   text eol=lf
+*.json  text eol=lf
+*.yml   text eol=lf
+VERSION text eol=lf
+packaging/KOREADER_VERSION text eol=lf
