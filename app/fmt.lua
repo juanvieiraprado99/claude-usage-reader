@@ -6,9 +6,10 @@ Everything here tolerates nil, because a header can be missing (or the whole
 response can have failed) and the screens render "--" rather than crashing.
 ]]--
 
-local M = {}
+local i18n = require("i18n")
+local T = i18n.t
 
-local WEEKDAYS = { "DOM", "SEG", "TER", "QUA", "QUI", "SEX", "SÁB" }
+local M = {}
 
 -- Read a numeric rate-limit header out of the lowercased headers table.
 function M.num(h, key)
@@ -27,18 +28,18 @@ function M.hm(epoch)
     return os.date("%H:%M", epoch)
 end
 
--- "QUI 18:30"
+-- "THU 18:30" / "QUI 18:30" - the weekday names follow the current language.
 function M.resetDate(epoch)
     if not epoch then return "--" end
     local t = os.date("*t", epoch)
-    return string.format("%s %02d:%02d", WEEKDAYS[t.wday] or "--", t.hour, t.min)
+    return string.format("%s %02d:%02d", i18n.weekdays()[t.wday] or "--", t.hour, t.min)
 end
 
 -- Countdown to a reset: "2H 15M", or "1D 4H" once a day or more is left.
 function M.resetIn(epoch)
     if not epoch then return "--" end
     local secs = epoch - os.time()
-    if secs < 0 then return "agora" end
+    if secs < 0 then return T("now") end
     local hrs = math.floor(secs / 3600)
     local mins = math.floor((secs % 3600) / 60)
     if hrs >= 24 then

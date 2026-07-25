@@ -29,6 +29,8 @@ local Crypto = require("crypto")
 local ltn12 = require("ltn12")
 local https = require("ssl.https")
 local socket = require("socket")
+local i18n = require("i18n")
+local T = i18n.t
 
 local ENDPOINT = "https://api.anthropic.com/v1/messages"
 local STATUS_ENDPOINT = "https://status.claude.com/api/v2/incidents/unresolved.json"
@@ -66,6 +68,8 @@ local DATA_DIR = os.getenv("CLAUDEUSAGE_DATA") or DataStorage:getSettingsDir()
 
 function ClaudeUsage:init()
     self.settings = LuaSettings:open(DATA_DIR .. "/claudeusage.lua")
+    -- "auto" (follow the environment), "pt" or "en".
+    i18n.setLang(self.settings:readSetting("lang") or "auto")
     self.refresh_interval = self.settings:readSetting("refresh_interval") or 0
     self.change_locked = false
     -- Exposed to the screens (page nav + model list).
@@ -107,7 +111,7 @@ function ClaudeUsage:logout()
     self.settings:delSetting("pin_fail")
     self.settings:flush()
     self.session_token = nil
-    UIManager:show(InfoMessage:new{ text = "Token apagado." })
+    UIManager:show(InfoMessage:new{ text = T("Token cleared.") })
 end
 
 -- Ask for a numeric PIN; calls on_pin(pin) with the entered value.
@@ -117,7 +121,7 @@ function ClaudeUsage:promptPin(title, on_pin)
         title = title,
         input_type = "number",
         buttons = {{
-            { text = "Cancelar", id = "close",
+            { text = T("Cancel"), id = "close",
               callback = function() UIManager:close(dialog) end },
             { text = "OK", is_enter_default = true,
               callback = function()
@@ -133,7 +137,7 @@ end
 
 -- Decrypt the stored token with a PIN; caches it in RAM for this session.
 function ClaudeUsage:promptUnlock(on_ok)
-    self:promptPin("Bloqueado — digite seu PIN.", function(pin)
+    self:promptPin(T("Locked — enter your PIN."), function(pin)
         local blob = self.settings:readSetting("enc")
         local tok = blob and Crypto.decrypt(blob, pin)
         if tok then
@@ -145,11 +149,11 @@ function ClaudeUsage:promptUnlock(on_ok)
             local fails = (self.settings:readSetting("pin_fail") or 0) + 1
             if fails >= MAX_FAILS then
                 self:logout()
-                UIManager:show(InfoMessage:new{ text = "Tentativas demais — token apagado." })
+                UIManager:show(InfoMessage:new{ text = T("Too many attempts — token wiped.") })
             else
                 self.settings:saveSetting("pin_fail", fails)
                 self.settings:flush()
-                UIManager:show(InfoMessage:new{ text = "PIN incorreto." })
+                UIManager:show(InfoMessage:new{ text = T("Wrong PIN.") })
             end
         end
     end)
@@ -158,14 +162,14 @@ end
 -- Encrypt a freshly-received token under a new PIN and store it.
 function ClaudeUsage:setPinAndStore(tok)
     if not Crypto.available() then
-        UIManager:show(InfoMessage:new{ text = "Criptografia indisponível — não dá para guardar." })
+        UIManager:show(InfoMessage:new{ text = T("Encryption unavailable — cannot store.") })
         return
     end
-    self:promptPin("Crie um PIN de 4 dígitos", function(pin)
+    self:promptPin(T("Create a 4-digit PIN"), function(pin)
         if not pin or pin == "" then return end
         local blob = Crypto.encrypt(tok, pin)
         if not blob then
-            UIManager:show(InfoMessage:new{ text = "Criptografia indisponível — não dá para guardar." })
+            UIManager:show(InfoMessage:new{ text = T("Encryption unavailable — cannot store.") })
             return
         end
         self.settings:saveSetting("enc", blob)
@@ -186,13 +190,13 @@ function ClaudeUsage:webLogin()
     if NetworkMgr and NetworkMgr.isConnected then
         local ok, connected = pcall(function() return NetworkMgr:isConnected() end)
         if ok and not connected then
-            UIManager:show(InfoMessage:new{ text = "Conecte o Kindle ao WiFi primeiro." })
+            UIManager:show(InfoMessage:new{ text = T("Connect the Kindle to WiFi first.") })
             return
         end
     end
     local ip = TokenServer.get_ip()
     if not ip then
-        UIManager:show(InfoMessage:new{ text = "Sem IP na rede. Verifique o WiFi." })
+        UIManager:show(InfoMessage:new{ text = T("No network IP. Check WiFi.") })
         return
     end
     self.login_open = true
@@ -202,7 +206,7 @@ function ClaudeUsage:webLogin()
         on_token = function(tok)
             -- Validate the token before storing it (reject junk/expired).
             if not self:probeToken(tok) then
-                UIManager:show(InfoMessage:new{ text = "Token inválido (recusado)." })
+                UIManager:show(InfoMessage:new{ text = T("Invalid token (rejected).") })
                 return
             end
             self:setPinAndStore(tok)
@@ -222,7 +226,7 @@ end
 function ClaudeUsage:setRefreshInterval(secs)
     if self.change_locked then
         UIManager:show(InfoMessage:new{
-            text = string.format("Espere %d s para mudar de novo.", CHANGE_COOLDOWN),
+            text = string.format(T("Wait %d s before changing again."), CHANGE_COOLDOWN),
             timeout = 1,
         })
         return false
@@ -270,7 +274,7 @@ end
 function ClaudeUsage:fetch(arg_token)
     local token = arg_token or self.session_token
     if not token or token == "" then
-        return nil, "sem token"
+        return nil, T("no token")
     end
 
     local resp = {}
@@ -284,9 +288,9 @@ function ClaudeUsage:fetch(arg_token)
         return headers
     end
 
-    if not ok then return done("sem rede") end
-    if code == 401 or code == 403 then return done("token expirado", true) end
-    if code ~= 200 or not headers then return done("erro " .. tostring(code)) end
+    if not ok then return done(T("no network")) end
+    if code == 401 or code == 403 then return done(T("token expired"), true) end
+    if code ~= 200 or not headers then return done(T("error ") .. tostring(code)) end
     -- luasocket lowercases the header keys for us.
     return done()
 end
@@ -416,7 +420,7 @@ function ClaudeUsage:refreshModels()
     for _, res in pairs(self._model_results) do
         if res.code and res.code > 0 then reachable = true end
     end
-    if not reachable then err = "sem rede" end
+    if not reachable then err = T("no network") end
     self:noteFetchResult(err == nil)
     return auth, err
 end
@@ -424,7 +428,7 @@ end
 -- Ensure the token is unlocked, then run cb().
 function ClaudeUsage:withUnlocked(cb)
     if not self:hasToken() then
-        UIManager:show(InfoMessage:new{ text = "Faça login primeiro." })
+        UIManager:show(InfoMessage:new{ text = T("Log in first.") })
         return
     end
     if not self:isUnlocked() then
@@ -460,6 +464,16 @@ function ClaudeUsage:cycleRotation()
     UIManager:setDirty("all", "full")   -- the whole geometry changed
 end
 
+-- Switch between Portuguese and English and redraw. Persisted as an explicit
+-- choice, so it stops following the environment once the user has picked.
+function ClaudeUsage:toggleLanguage()
+    local nxt = (i18n.lang() == "pt") and "en" or "pt"
+    i18n.setLang(nxt)
+    self.settings:saveSetting("lang", nxt)
+    self.settings:flush()
+    if self.cur_screen then self.cur_screen:rebuild() end
+end
+
 -- Advance the auto-refresh interval to the next value in the cycle.
 function ClaudeUsage:cycleInterval()
     local cur = self.refresh_interval
@@ -489,13 +503,14 @@ function ClaudeUsage:closeUI()
     UIManager:quit()
 end
 
--- Settings dialog (gear icon): rotation, refresh interval, close app.
+-- Settings dialog, reached by tapping the version label: language, refresh
+-- interval, login/logout, quit.
 function ClaudeUsage:showSettings()
     local dlg
     local function close_dlg() if dlg then UIManager:close(dlg) end end
     local interval_row = {}
     for _, v in ipairs(INTERVAL_CYCLE) do
-        local label = (v == 0) and "Off" or (v .. "s")
+        local label = (v == 0) and T("Off") or (v .. "s")
         if v == self.refresh_interval then label = label .. " •" end
         table.insert(interval_row, {
             text = label,
@@ -513,7 +528,7 @@ function ClaudeUsage:showSettings()
     local account_row = {}
     if self:hasToken() then
         table.insert(account_row, {
-            text = "Logout (apagar token)",
+            text = T("Logout (clear token)"),
             callback = function()
                 close_dlg()
                 self:logout()
@@ -526,20 +541,26 @@ function ClaudeUsage:showSettings()
         })
     else
         table.insert(account_row, {
-            text = "Login (web)",
+            text = T("Login (web)"),
             callback = function() close_dlg(); self:webLogin() end,
         })
     end
 
     dlg = ButtonDialog:new{
-        title = "Configurações",
+        title = T("Settings"),
         title_align = "center",
         buttons = {
             -- Rotation lives on the screen itself now (the arrow button).
+            {{
+                -- Shows the language in use; tapping switches to the other one.
+                text = T("Language") .. ": "
+                       .. (i18n.lang() == "pt" and "Português" or "English"),
+                callback = function() close_dlg(); self:toggleLanguage() end,
+            }},
             interval_row,
             account_row,
             {{
-                text = "Fechar app",
+                text = T("Quit app"),
                 callback = function() close_dlg(); self:closeUI() end,
             }},
         },

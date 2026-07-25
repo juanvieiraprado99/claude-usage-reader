@@ -19,6 +19,7 @@ local History = require("history")
 local ScreenBase = require("screenbase")
 local Theme = require("theme")
 local Fmt = require("fmt")
+local T = require("i18n").t
 
 local sb, face, C = Theme.sb, Theme.face, Theme.color
 local H5_PCT = "anthropic-ratelimit-unified-5h-utilization"
@@ -75,17 +76,17 @@ end
 -- layout --------------------------------------------------------------------
 function TrendScreen:statusText(proj)
     local s = proj and proj.status
-    if s == "exhausted" then return "Esgotado - reseta em " .. Fmt.resetIn(self._reset) end
-    if s == "stable" then return "Uso estável neste ritmo" end
+    if s == "exhausted" then return T("Exhausted - resets in ") .. Fmt.resetIn(self._reset) end
+    if s == "stable" then return T("Steady at this pace") end
     if s == "will_exhaust" then
-        return string.format("Neste ritmo, esgota %s (em %dm)",
+        return string.format(T("At this pace, exhausted %s (in %dm)"),
                              Fmt.resetDate(proj.eta), proj.mins or 0)
     end
     if s == "safe" then
-        return string.format("Seguro - ~%d%% no reset",
+        return string.format(T("Safe - ~%d%% at reset"),
                              math.floor((proj.end_pct or 0) * 100 + 0.5))
     end
-    return "Coletando dados..."
+    return T("Collecting data...")
 end
 
 function TrendScreen:mkChart(w, h, p5, reset_epoch)
@@ -138,9 +139,9 @@ function TrendScreen:rebuild()
         align = "center",
         VerticalGroup:new{
             align = "center",
-            TextWidget:new{ text = "JANELA DE 5H", face = face(18), bold = true },
+            TextWidget:new{ text = T("5H WINDOW"), face = face(18), bold = true },
             VerticalSpan:new{ width = sb(2) },
-            TextWidget:new{ text = "uso real + projecao", face = face(12), fgcolor = C.muted },
+            TextWidget:new{ text = T("real use + projection"), face = face(12), fgcolor = C.muted },
         },
         VerticalSpan:new{ width = sb(10) },
         chart_frame,
@@ -151,7 +152,7 @@ function TrendScreen:rebuild()
             align = "center",
             TextWidget:new{ text = Fmt.pct(p5), face = face(52), bold = true },
             VerticalSpan:new{ width = sb(4) },
-            TextWidget:new{ text = "RESETA EM - " .. Fmt.resetDate(self._reset)
+            TextWidget:new{ text = T("RESETS IN - ") .. Fmt.resetDate(self._reset)
                             .. "  (" .. Fmt.resetIn(self._reset) .. ")",
                             face = face(13), fgcolor = C.muted },
             VerticalSpan:new{ width = sb(6) },

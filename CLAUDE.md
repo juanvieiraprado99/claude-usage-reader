@@ -167,6 +167,15 @@ import from `koreader/settings/` for users of the old plugin.
   by paintTo), NOT fixed fractions.
   `modelsscreen.lua` / `trendscreen.lua` are pages 2 and 3 of the swipe
   carousel; `trendscreen` renders via `chart.lua` over `history.lua`.
+- `app/i18n.lua` — PT/EN. The **msgid is the English text**, so a missing entry
+  degrades to English instead of to a key. (An earlier version had the table
+  keyed on English while every call site passed Portuguese: it never matched,
+  and the app was simply Portuguese pretending to be bilingual. The smoke test
+  now asserts a real translation.) Language is `auto`/`pt`/`en`, persisted as
+  `lang` and toggled from the settings dialog; `auto` reads `LANG`/`LANGUAGE`
+  and falls back to **pt**. NEVER call `T()` at module load — a constant built
+  then freezes the language and a switch would not reach it (see `navLabels()`
+  in `screenbase.lua`). Weekday names come from `i18n.weekdays()`.
 - `app/appversion.lua` — returns the version string shown in the bottom-right of
   every screen. `packaging/build.sh` overwrites it in the staged package with
   `APP_VERSION`; the copy in the repo stays `"dev"`. **Not** named `version.lua`:

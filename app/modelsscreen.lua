@@ -24,6 +24,7 @@ local UIManager = require("ui/uimanager")
 local Clawd = require("clawd")
 local ScreenBase = require("screenbase")
 local Theme = require("theme")
+local T = require("i18n").t
 
 local sb, face, C = Theme.sb, Theme.face, Theme.color
 
@@ -43,18 +44,18 @@ local function modelChip(res)
     if not code or code == 0 then
         return ScreenBase.pill("--", C.fill, pale, pale_border)
     elseif code == 200 then
-        return ScreenBase.pill(string.format("OK %.1fs", (res.ms or 0) / 1000),
+        return ScreenBase.pill(string.format(T("OK %.1fs"), (res.ms or 0) / 1000),
                                C.fill, C.fg, C.border)
     elseif code == 429 then
-        return ScreenBase.pill("LIMITADO", mid_fill, C.fg, C.border)
+        return ScreenBase.pill(T("LIMITED"), mid_fill, C.fg, C.border)
     elseif code == 404 then
-        return ScreenBase.pill("N/D", C.fill, C.border, pale_border)
+        return ScreenBase.pill(T("N/A"), C.fill, C.border, pale_border)
     elseif code == 401 or code == 403 then
-        return ScreenBase.pill("AUTH", dark_fill, C.fill, C.fg)
+        return ScreenBase.pill(T("AUTH"), dark_fill, C.fill, C.fg)
     elseif code < 0 then
-        return ScreenBase.pill("REDE", dark_fill, C.fill, C.fg)
+        return ScreenBase.pill(T("NET"), dark_fill, C.fill, C.fg)
     end
-    return ScreenBase.pill("ERRO " .. tostring(code), dark_fill, C.fill, C.fg)
+    return ScreenBase.pill(T("ERROR ") .. tostring(code), dark_fill, C.fill, C.fg)
 end
 
 -- data ----------------------------------------------------------------------
@@ -113,18 +114,18 @@ function ModelScreen:buildInfoLines()
     local inc = self.plugin._incidents
     local incident_line
     if not inc or not inc.has_data then
-        incident_line = "status.claude.com: sem dados"
+        incident_line = T("status.claude.com: no data")
     else
         local any_down = false
         for _, m in ipairs(self.plugin.MODELS) do
             if inc.up[m.name] == false then any_down = true end
         end
-        incident_line = any_down and "Incidente ativo - veja status.claude.com"
-                                  or "status.claude.com: OK - sem incidentes"
+        incident_line = any_down and T("Active incident - see status.claude.com")
+                                  or T("status.claude.com: OK - no incidents")
     end
     return VerticalGroup:new{
         align = "left",
-        TextWidget:new{ text = "Sonda real na API: 4 na abertura, 1 por ciclo",
+        TextWidget:new{ text = T("Real API probe: 4 on open, 1 per cycle"),
                         face = face(13), fgcolor = C.muted },
         VerticalSpan:new{ width = sb(6) },
         TextWidget:new{ text = incident_line, face = face(13), fgcolor = C.muted },

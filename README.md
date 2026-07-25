@@ -168,7 +168,11 @@ that PIN once to unlock (cached in RAM while the app is open).
 
 Launching **Claude Usage** from KUAL goes straight to the dashboard after the PIN. Swipe between
 the three pages (dashboard, models, 5h trend). Tapping the **version label** in the bottom-right
-corner opens the settings dialog: refresh interval, **Logout** and **Fechar app**.
+corner opens the settings dialog: **language** (Português / English), refresh interval,
+**Logout** and **Quit app**.
+
+The interface follows your system language, defaulting to Portuguese, and the choice you
+make in the dialog is remembered.
 
 - **Logout (clear token)** wipes the stored token (e.g. before lending the device).
 - There is **no bundled token** — each user logs in with their own account.
@@ -208,6 +212,7 @@ app/
   chacha20.lua       ChaCha20 stream cipher for LuaJIT (self-tested vs RFC 8439 vectors)
   tokenserver.lua    Transient LAN HTTP receiver for the token form (luasocket)
   loginmodal.lua     QR code modal — owns TokenServer, rotates PIN/URL/QR every 5 min
+  i18n.lua           Portuguese/English strings (English msgids)
 extensions/claudeusage/
   config.xml         Extension manifest — without it KUAL ignores the folder
   menu.json          KUAL menu entry

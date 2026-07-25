@@ -25,6 +25,7 @@ local Clawd = require("clawd")
 local ScreenBase = require("screenbase")
 local Theme = require("theme")
 local Fmt = require("fmt")
+local T = require("i18n").t
 
 local sb, face, C = Theme.sb, Theme.face, Theme.color
 local H5_PCT = "anthropic-ratelimit-unified-5h-utilization"
@@ -173,7 +174,7 @@ function UsageScreen:makeCard(title, frac, epoch, card_w)
             fillcolor = C.bar,
         },
         VerticalSpan:new{ width = sb(12) },
-        TextWidget:new{ text = "RESETA EM - " .. Fmt.resetDate(epoch),
+        TextWidget:new{ text = T("RESETS IN - ") .. Fmt.resetDate(epoch),
                         face = face(12), fgcolor = C.muted },
         VerticalSpan:new{ width = sb(2) },
         TextWidget:new{ text = Fmt.resetIn(epoch), face = face(28), bold = true },
@@ -204,10 +205,10 @@ function UsageScreen:mascotHolder()
 end
 
 function UsageScreen:statusText()
-    if self.err then return "erro de rede" end
+    if self.err then return T("network error") end
     local status = self.data and self.data[H_STATUS]
-    if status == "rejected" then return "LIMITADO" end
-    if status == "allowed_warning" then return "AVISO" end
+    if status == "rejected" then return T("LIMITED") end
+    if status == "allowed_warning" then return T("WARNING") end
     if status == "allowed" then return "OK" end
     return "..."
 end
@@ -215,10 +216,10 @@ end
 function UsageScreen:buildDataColumn()
     return VerticalGroup:new{
         align = "left",
-        TextWidget:new{ text = "STATUS: " .. self:statusText(),
+        TextWidget:new{ text = T("STATUS: ") .. self:statusText(),
                         face = face(15), bold = true },
         VerticalSpan:new{ width = sb(6) },
-        TextWidget:new{ text = string.format("MAIOR USO: %d%%", math.floor(self:maxPct())),
+        TextWidget:new{ text = string.format(T("PEAK USE: %d%%"), math.floor(self:maxPct())),
                         face = face(13), fgcolor = C.muted },
     }
 end
@@ -261,9 +262,9 @@ function UsageScreen:rebuild(anim_only)
             align = "center",
             VerticalGroup:new{
                 align = "center",
-                self:makeCard("5 HORAS", p5, e5, card_w),
+                self:makeCard(T("5 HOURS"), p5, e5, card_w),
                 VerticalSpan:new{ width = sb(12) },
-                self:makeCard("SEMANAL", p7, e7, card_w),
+                self:makeCard(T("WEEKLY"), p7, e7, card_w),
             },
             HorizontalSpan:new{ width = sb(28) },
             lower,
@@ -274,9 +275,9 @@ function UsageScreen:rebuild(anim_only)
             align = "center",
             HorizontalGroup:new{
                 align = "top",
-                self:makeCard("5 HORAS", p5, e5, card_w),
+                self:makeCard(T("5 HOURS"), p5, e5, card_w),
                 HorizontalSpan:new{ width = sb(12) },
-                self:makeCard("SEMANAL", p7, e7, card_w),
+                self:makeCard(T("WEEKLY"), p7, e7, card_w),
             },
             VerticalSpan:new{ width = sb(20) },
             lower,

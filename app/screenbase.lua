@@ -30,10 +30,14 @@ local RotIcon = require("roticon")
 local Clawd = require("clawd")
 local Version = require("appversion")
 local Theme = require("theme")
+local T = require("i18n").t
 
 local sb, face, C = Theme.sb, Theme.face, Theme.color
 
-local NAV_LABELS = { "Uso", "Modelos", "5h" }
+-- Built per call, not once at load: a language change has to reach the labels.
+local function navLabels()
+    return { T("Usage"), T("Models"), T("5h") }
+end
 
 local ScreenBase = InputContainer:extend{
     plugin = nil,
@@ -188,14 +192,14 @@ function ScreenBase.rotPill()
     }
 end
 
--- "atualizado 14:03" on the left, the auto-refresh and close pills on the right.
+-- "updated 14:03" on the left, the auto-refresh and close pills on the right.
 function ScreenBase:buildHeader(updated)
     local lw = self.width - 2 * sb(Theme.MARGIN)
     local left = TextWidget:new{ text = updated, face = face(14), fgcolor = C.muted }
     local secs = self.plugin.refresh_interval
-    local itxt = (secs == 0) and "AUTO OFF" or string.format("AUTO %ds", secs)
+    local itxt = (secs == 0) and T("AUTO OFF") or string.format(T("AUTO %ds"), secs)
     self.refresh_btn = ScreenBase.pill(itxt, C.white)
-    self.close_btn = ScreenBase.pill("FECHAR", C.fill)
+    self.close_btn = ScreenBase.pill(T("CLOSE"), C.fill)
     local right = HorizontalGroup:new{
         align = "center",
         self.refresh_btn,
@@ -214,8 +218,9 @@ end
 -- One button per page, the current one inverted. Refs kept for hit-testing.
 function ScreenBase:makeNav(active)
     self.nav_btns = {}
+    local labels = navLabels()
     local grp = HorizontalGroup:new{ align = "center" }
-    for i, label in ipairs(NAV_LABELS) do
+    for i, label in ipairs(labels) do
         local is_active = (i == active)
         local btn = FrameContainer:new{
             bordersize = sb(Theme.pill.bordersize),
@@ -229,7 +234,7 @@ function ScreenBase:makeNav(active)
         }
         self.nav_btns[i] = btn
         table.insert(grp, btn)
-        if i < #NAV_LABELS then
+        if i < #labels then
             table.insert(grp, HorizontalSpan:new{ width = sb(12) })
         end
     end
@@ -295,11 +300,11 @@ function ScreenBase:buildTop(updated, lw)
     }
 end
 
--- "atualizado HH:MM" / "carregando..." / "falhou"
+-- "updated HH:MM" / "loading..." / "failed"
 function ScreenBase:updatedLabel(has_data)
-    if self.err then return "falhou" end
-    if has_data then return "atualizado " .. os.date("%H:%M", self.last_ok) end
-    return "carregando..."
+    if self.err then return T("failed") end
+    if has_data then return T("updated ") .. os.date("%H:%M", self.last_ok) end
+    return T("loading...")
 end
 
 return ScreenBase

@@ -122,5 +122,33 @@ do
           drawn == 0, drawn)
 end
 
+-- Translation must actually translate, and switching must survive a rebuild.
+-- The previous i18n was keyed the wrong way round and silently did nothing, so
+-- assert on a real string rather than just "it did not crash".
+do
+    local i18n = require("i18n")
+    i18n.setLang("pt")
+    check("pt translates", i18n.t("CLOSE") == "FECHAR", i18n.t("CLOSE"))
+    check("pt weekdays", i18n.weekdays()[1] == "DOM", i18n.weekdays()[1])
+    i18n.setLang("en")
+    check("en passes through", i18n.t("CLOSE") == "CLOSE", i18n.t("CLOSE"))
+    check("en weekdays", i18n.weekdays()[1] == "SUN", i18n.weekdays()[1])
+    check("unknown msgid falls back to English",
+          i18n.t("not a real msgid") == "not a real msgid")
+
+    for _, lang in ipairs({ "pt", "en" }) do
+        i18n.setLang(lang)
+        for page = 1, 3 do
+            try("page " .. page .. " builds in " .. lang, function()
+                app:openPage(page)
+                UIManager:_repaint()
+            end)
+        end
+    end
+
+    try("language toggle", function() app:toggleLanguage() end)
+    try("repaint after toggle", function() UIManager:_repaint() end)
+end
+
 print(failures == 0 and "SMOKE OK" or ("SMOKE FAILED (" .. failures .. ")"))
 os.exit(failures == 0 and 0 or 1)
