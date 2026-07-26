@@ -1,0 +1,33 @@
+# Categories for the "What's Changed" section of a release. Read by the GitHub
+# API endpoint /releases/generate-notes, which release.yml calls before it
+# publishes — so a PR's TITLE is the line users read in the release, and its
+# LABELS decide which heading it lands under.
+#
+# The trailing catch-all is not optional: without it an unlabelled PR is
+# dropped from the notes entirely.
+
+changelog:
+  exclude:
+    labels:
+      - ignore-for-release
+  categories:
+    - title: Novidades
+      labels:
+        - feature
+        - enhancement
+    - title: Correções
+      labels:
+        - bug
+        - fix
+    - title: Documentação
+      labels:
+        - documentation
+    - title: Manutenção
+      labels:
+        - chore
+        - refactor
+        - ci
+        - test
+    - title: Outras mudanças
+      labels:
+        - "*"

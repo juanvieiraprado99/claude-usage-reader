@@ -12,6 +12,9 @@ on:
 
 permissions:
   contents: write
+  # generate-notes resolves each commit back to its pull request; the token only
+  # gets what is declared here.
+  pull-requests: read
 
 concurrency:
   group: release
@@ -22,7 +25,6 @@ defaults:
     shell: bash
 
 jobs:
-
   # Boot the app headless against the Linux build of the same KOReader release,
   # with prune.txt applied, so a broken boot or an over-aggressive prune never
   # reaches a release. Same idea as packaging/run-docker.sh, minus Docker.
@@ -85,7 +87,9 @@ jobs:
       - name: Build ${{ matrix.platform }}
         run: |
           ./packaging/fetch-runtime.sh "$(cat packaging/KOREADER_VERSION)" "${{ matrix.platform }}"
-          APP_VERSION="$(cat VERSION).${{ github.run_number }}" ./packaging/build.sh
+          # No APP_VERSION here on purpose: build.sh reads VERSION itself, so the
+          # file stays the single source and CI cannot drift from a local build.
+          ./packaging/build.sh
 
       # Guards against a silently mismatched runtime: a package whose luajit
       # wants an interpreter the target device lacks fails with a bare
@@ -113,7 +117,11 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ !contains(github.event.head_commit.message, '[skip ci]') }}
     steps:
+      # Full history: the changelog fallback below needs the tags, which the
+      # default shallow checkout does not fetch.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/download-artifact@v4
         with:
@@ -124,11 +132,52 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          VERSION="$(cat VERSION).${{ github.run_number }}"
+          VERSION="$(cat VERSION)"
           KOVER="$(cat packaging/KOREADER_VERSION)"
+
+          # The version is now the VERSION file rather than the run number, so a
+          # push that does not bump it would try to recreate an existing tag.
+          # Skip instead of failing: build and smoke already ran, and that is the
+          # part that gates the push. Releases happen when VERSION changes.
+          if gh release view "v${VERSION}" >/dev/null 2>&1; then
+            echo "::notice::v${VERSION} already released - bump VERSION to publish a new one"
+            exit 0
+          fi
+
           ls -lh artifacts
+
+          # What changed since the previous release. The API resolves each
+          # commit back to its pull request, so a merged PR shows up with its
+          # title, author and number, grouped by the categories in
+          # .github/release.yml. No previous_tag_name: the API already uses the
+          # last published release as the base.
+          # Never fatal - a release without a changelog still beats no release.
+          gh api --method POST \
+            "repos/${{ github.repository }}/releases/generate-notes" \
+            -f tag_name="v${VERSION}" -q .body >changelog.md 2>gen-notes.err \
+            || { echo "::warning::generate-notes failed"; cat gen-notes.err; : >changelog.md; }
+
+          # Fallback for a push that never went through a PR: the API finds
+          # nothing to associate and returns an empty body.
+          if [ ! -s changelog.md ]; then
+            prev="$(git tag --list 'v*' --sort=-v:refname | head -n1)"
+            {
+              echo "### What's Changed"
+              echo
+              if [ -n "$prev" ]; then
+                git log --first-parent --pretty='* %s' "${prev}..HEAD"
+              else
+                git log --first-parent --pretty='* %s'
+              fi
+            } >changelog.md
+          fi
+
           cat >notes.md <<EOF
           Claude Code rate-limit usage on a jailbroken Kindle.
+
+          EOF
+          cat changelog.md >>notes.md
+          cat >>notes.md <<EOF
 
           ### Which file do I want?
 

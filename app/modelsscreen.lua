@@ -38,18 +38,19 @@ local function modelChip(res)
     local code = res and res.code
     local dark_fill = Blitbuffer.Color8(0x44)
     local mid_fill = Blitbuffer.Color8(0xAA)
-    local pale = Blitbuffer.Color8(0xBB)
     local pale_border = Blitbuffer.Color8(0xCC)
 
+    -- Chip LABELS stay at text greys even when the chip is meant to read as
+    -- inactive: the pale border can carry that, the text cannot afford to.
     if not code or code == 0 then
-        return ScreenBase.pill("--", C.fill, pale, pale_border)
+        return ScreenBase.pill("--", C.fill, C.muted, pale_border)
     elseif code == 200 then
         return ScreenBase.pill(string.format(T("OK %.1fs"), (res.ms or 0) / 1000),
                                C.fill, C.fg, C.border)
     elseif code == 429 then
         return ScreenBase.pill(T("LIMITED"), mid_fill, C.fg, C.border)
     elseif code == 404 then
-        return ScreenBase.pill(T("N/A"), C.fill, C.border, pale_border)
+        return ScreenBase.pill(T("N/A"), C.fill, C.muted, pale_border)
     elseif code == 401 or code == 403 then
         return ScreenBase.pill(T("AUTH"), dark_fill, C.fill, C.fg)
     elseif code < 0 then
@@ -92,8 +93,11 @@ function ModelScreen:makeModelCard(i, card_w)
     if res and res.reason and res.code ~= 200 then
         table.insert(group, VerticalSpan:new{ width = sb(4) })
         table.insert(group, TextWidget:new{
-            text = res.reason, face = face(10), max_width = card_w - sb(20),
-            fgcolor = C.border })
+            -- C.muted, not C.border: this is text, and a border grey is far too
+            -- light to read on e-ink. It is also the line that tells "rate
+            -- limited" from "not on your plan", so it has to be legible.
+            text = res.reason, face = face(10), bold = true,
+            max_width = card_w - sb(20), fgcolor = C.muted })
     end
     return FrameContainer:new{
         width = card_w,
@@ -126,9 +130,10 @@ function ModelScreen:buildInfoLines()
     return VerticalGroup:new{
         align = "left",
         TextWidget:new{ text = T("Real API probe: 4 on open, 1 per cycle"),
-                        face = face(13), fgcolor = C.muted },
+                        face = face(13), bold = true, fgcolor = C.muted },
         VerticalSpan:new{ width = sb(6) },
-        TextWidget:new{ text = incident_line, face = face(13), fgcolor = C.muted },
+        TextWidget:new{ text = incident_line, face = face(13), bold = true,
+                        fgcolor = C.muted },
     }
 end
 

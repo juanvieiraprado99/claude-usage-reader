@@ -6,3 +6,5 @@
 packaging/.kpm-helper.py
 /.emulator-data/
 /.docker-smoke/
+# Written by packaging/build-docker.sh; removed on success, lingers on failure.
+/.docker-build.sh

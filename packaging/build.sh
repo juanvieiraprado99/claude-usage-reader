@@ -8,9 +8,10 @@
 #   dist/claudeusage-<ver>-<platform>.zip   KUAL extension, unzip into /mnt/us/extensions/
 #   dist/claudeusage_<ver>_<platform>.kpkg  KPM package, `;kpm install` / add-repo
 #
-# APP_VERSION must be three numbers - KPM manifests encode versions as
-# [major, minor, patch]. CI sets it to <VERSION>.<run number>; local builds get
-# <VERSION>.0.
+# The version comes from the VERSION file and nowhere else - CI reads it too, so
+# a local build and a release built from the same commit carry the same number.
+# It must be three numbers, because KPM manifests encode versions as
+# [major, minor, patch]. APP_VERSION overrides it for one-off builds.
 
 set -euo pipefail
 
@@ -23,10 +24,10 @@ STAGE="$DIST/claudeusage"
 
 PLATFORM="$(cat "$RUNTIME/.platform" 2>/dev/null || echo kindlehf)"
 
-APP_VERSION="${APP_VERSION:-$(cat "$ROOT/VERSION" 2>/dev/null).0}"
+APP_VERSION="${APP_VERSION:-$(cat "$ROOT/VERSION" 2>/dev/null)}"
 case "$APP_VERSION" in
     [0-9]*.[0-9]*.[0-9]*) ;;
-    *) echo "bad APP_VERSION '$APP_VERSION' - expected major.minor.patch" >&2; exit 1 ;;
+    *) echo "bad version '$APP_VERSION' - expected major.minor.patch in VERSION" >&2; exit 1 ;;
 esac
 
 echo "==> version $APP_VERSION, platform $PLATFORM"
