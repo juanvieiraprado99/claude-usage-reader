@@ -134,6 +134,15 @@ import from `koreader/settings/` for users of the old plugin.
   The `build` job additionally
   asserts each package's `luajit` asks for the right ELF interpreter
   (`ld-linux.so.3` vs `ld-linux-armhf.so.3`).
+  The `release` job asks the GitHub API (`releases/generate-notes`) what changed
+  since the previous release and pastes it above the install table, so **a
+  merged PR's title is the changelog line users read** — write it that way, and
+  label the PR (`feature`/`bug`/`documentation`/`chore`…), because
+  `.github/release.yml` groups the notes by label; unlabelled PRs land under
+  "Outras mudanças". A push straight to `main` has no PR to resolve, so the step
+  falls back to `git log --first-parent` since the last `v*` tag — which is why
+  that job checks out with `fetch-depth: 0`. Neither path is allowed to fail the
+  release. A release still only happens when `VERSION` changes.
 - `packaging/` — `fetch-runtime.sh` (download release; writes `runtime/.platform`
   used to name artifacts and fill the KPM manifest), `prune.txt` (what gets
   stripped, ordered least→most risky), `build.sh` (stage + prune + zip + kpkg),
