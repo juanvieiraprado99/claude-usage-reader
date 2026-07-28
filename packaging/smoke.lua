@@ -100,6 +100,107 @@ check("version label is a string", type(require("appversion")) == "string")
 try("settings dialog opens", function() app:showSettings() end)
 check("settings dialog on screen", #UIManager._window_stack > 1)
 
+-- The animations row is the only way to reach the setting; confirm it is
+-- actually on the dialog and shows the current state.
+do
+    local T = require("i18n").t
+    local dlg = UIManager._window_stack[#UIManager._window_stack].widget
+    local expect = app.animations and T("Animations: on") or T("Animations: off")
+    local found = false
+    for _, row in ipairs(dlg.buttons or {}) do
+        for _, btn in ipairs(row) do
+            if btn.text == expect then found = true end
+        end
+    end
+    check("animations row present in settings dialog", found, expect)
+
+    -- Same check for the screensaver-prevention row, on the same dialog.
+    local expect2 = app.prevent_screensaver and T("Keep awake: on") or T("Keep awake: off")
+    local found2 = false
+    for _, row in ipairs(dlg.buttons or {}) do
+        for _, btn in ipairs(row) do
+            if btn.text == expect2 then found2 = true end
+        end
+    end
+    check("keep-awake row present in settings dialog", found2, expect2)
+
+    UIManager:close(dlg)
+end
+
+-- Toggling prevent_screensaver must persist and must not throw off a Kindle -
+-- Powersave.set() no-ops via Device:isKindle(), which is exactly what a linux
+-- x86_64 smoke run needs to prove is safe.
+do
+    check("screensaver prevention default on", app.prevent_screensaver == true)
+    try("toggle keep-awake off", function() app:togglePreventScreensaver() end)
+    check("setting persisted off", app.settings:readSetting("prevent_screensaver") == false)
+    check("app reflects off", app.prevent_screensaver == false)
+    try("toggle keep-awake back on", function() app:togglePreventScreensaver() end)
+    check("setting persisted on", app.settings:readSetting("prevent_screensaver") == true)
+end
+
+-- Toggling animations off must stop the dashboard from scheduling any more of
+-- them, and toggling back on must resume. The smoke harness never drains
+-- UIManager's task queue (that only happens inside the real handleInput loop,
+-- which nothing here runs), so scheduleNextAnim() is called directly instead
+-- of relying on the nextTick that would normally trigger it - this exercises
+-- the actual scheduling/cancellation, not just whether a callback fired.
+do
+    check("animations default on", app.animations == true)
+    app:openPage(1)
+    UIManager:_repaint()
+    local screen = app.cur_screen
+    screen:scheduleNextAnim()
+    check("scheduleNextAnim actually queues the task while on",
+          UIManager:unschedule(screen.anim_task))
+
+    screen:scheduleNextAnim()
+    try("toggle animations off", function() app:toggleAnimations() end)
+    check("setting persisted off", app.settings:readSetting("animations") == false)
+    check("toggling off clears the scheduled animation",
+          not UIManager:unschedule(screen.anim_task))
+    try("repaint with animations off", function() UIManager:_repaint() end)
+
+    try("toggle animations back on", function() app:toggleAnimations() end)
+    check("setting persisted on", app.settings:readSetting("animations") == true)
+    check("toggling back on reschedules the animation",
+          UIManager:unschedule(app.cur_screen.anim_task))
+end
+
+-- Idle pacing: a stale last_activity must clamp the refresh delay, and a tap
+-- (noteActivity) must release it again without disturbing an explicit interval.
+do
+    app.refresh_interval = 10
+    app._fail_streak = 0
+    app.last_activity = os.time() - 400
+    check("idle clamps refresh delay to the floor", app:nextRefreshDelay() >= 60,
+          app:nextRefreshDelay())
+    app:noteActivity()
+    check("activity releases the idle clamp", app:nextRefreshDelay() == 10,
+          app:nextRefreshDelay())
+    app.refresh_interval = 0
+end
+
+-- Repaint skip: two ticks with identical rendered content must produce the
+-- same signature, and any changed number must break the match.
+do
+    app:openPage(1)
+    local screen = app.cur_screen
+    screen.err = nil
+    screen.last_ok = os.time()
+    screen.data = {
+        ["anthropic-ratelimit-unified-5h-utilization"] = "0.42",
+        ["anthropic-ratelimit-unified-7d-utilization"] = "0.10",
+        ["anthropic-ratelimit-unified-5h-reset"] = tostring(os.time() + 3600),
+        ["anthropic-ratelimit-unified-7d-reset"] = tostring(os.time() + 86400),
+        ["anthropic-ratelimit-unified-status"] = "allowed",
+    }
+    local sig1 = screen:displaySig()
+    check("identical data produces an identical sig", sig1 == screen:displaySig())
+    screen.data["anthropic-ratelimit-unified-5h-utilization"] = "0.55"
+    check("a changed utilization changes the sig", screen:displaySig() ~= sig1)
+end
+
 -- fetch() must report failure as (nil, message), never as a truthy result: a
 -- non-200 sneaking through renders as a silent "--%".
 do
@@ -381,12 +482,12 @@ do
 end
 
 -- Logout is reachable from the bottom bar, not only from the settings dialog
--- behind the version label. hasToken() reads the stored blob, so the button is
--- absent for the whole run above - stub the blob to get the other state.
+-- behind the version label. hasToken() reads the active account, so the button
+-- is absent for the whole run above - add a stub account to get the other state.
 do
     local i18n = require("i18n")
     i18n.setLang("pt")
-    app.settings:saveSetting("enc", "not-a-real-blob")
+    app.accounts:add("Smoke", "not-a-real-blob")
     check("token now looks stored", app:hasToken())
 
     app:openPage(1)
@@ -454,12 +555,343 @@ do
         check("token is gone after confirming", not app:hasToken())
     end
 
-    app.settings:delSetting("enc")
-    app.settings:flush()
+    -- Confirming already removed the record; clear any leftover so the next
+    -- block starts from a known-empty list.
+    for _ = 1, app.accounts:count() do
+        app.accounts:remove(app.accounts:list()[1].id)
+    end
     app:openPage(1)
     UIManager:_repaint()
     check("logout button is absent without a token",
           app.cur_screen.logout_btn == nil)
+end
+
+-- Accounts: the list itself, in isolation from the UI. A separate LuaSettings
+-- file so seeding a legacy layout cannot disturb the app's own settings.
+do
+    local Accounts = require("accounts")
+    local LuaSettings = require("luasettings")
+    local DataStorage = require("datastorage")
+    local dir = os.getenv("CLAUDEUSAGE_DATA") or DataStorage:getSettingsDir()
+    local path = dir .. "/smoke_accounts.lua"
+    os.remove(path)
+
+    -- Migration: a single-account install stored the blob at the top level.
+    local st = LuaSettings:open(path)
+    st:saveSetting("enc", "legacy-blob")
+    st:saveSetting("pin_fail", 3)
+    st:saveSetting("token", "legacy-plaintext")
+    st:flush()
+
+    local acc = Accounts.new(st, dir)
+    check("migration produced one account", acc:count() == 1, acc:count())
+    local first = acc:list()[1]
+    check("migration kept the blob", first and first.enc == "legacy-blob")
+    check("migration kept the failure counter", first and first.pin_fail == 3)
+    check("migrated account keeps the legacy history file",
+          first and first.hist == Accounts.LEGACY_HIST, first and first.hist)
+    check("migrated account is active", acc:active() == first)
+    check("top-level enc is gone", st:readSetting("enc") == nil)
+    check("legacy plaintext token is gone", st:readSetting("token") == nil)
+
+    -- Unnamed accounts fall back to a TRANSLATED label, resolved at call time.
+    local i18n = require("i18n")
+    i18n.setLang("pt")
+    check("unnamed account uses the translated fallback",
+          acc:label(first) == "Conta 1", acc:label(first))
+    i18n.setLang("en")
+    check("...and follows a language switch",
+          acc:label(first) == "Account 1", acc:label(first))
+
+    -- Adding: own id, own history file, becomes active.
+    local second = acc:add("Personal", "blob-2")
+    check("add returns a record", second ~= nil)
+    check("two accounts now", acc:count() == 2, acc:count())
+    check("the new account is active", acc:active() == second)
+    check("history files differ", acc:histPath(first) ~= acc:histPath(second),
+          acc:histPath(second))
+    check("a named account shows its name", acc:label(second) == "Personal")
+
+    -- Switching persists, and a reload sees it.
+    check("setActive works", acc:setActive(first.id))
+    local reloaded = Accounts.new(st, dir)
+    check("active account survives a reload",
+          reloaded:active() and reloaded:active().id == first.id)
+    check("both accounts survive a reload", reloaded:count() == 2)
+
+    -- The cap keeps the switcher a glanceable list.
+    while acc:count() < Accounts.MAX_ACCOUNTS do
+        acc:add(nil, "filler")
+    end
+    check("add refuses past the cap", acc:add("too many", "blob") == nil)
+
+    -- Removing takes the record and nothing else; ids are never reused, which is
+    -- what keeps a stale history file from being adopted by a later account.
+    local doomed = acc:list()[2].id
+    local seq_before = acc.seq
+    check("remove reports success", acc:remove(doomed))
+    check("remove dropped exactly one", acc:count() == Accounts.MAX_ACCOUNTS - 1)
+    check("remove left the others alone", acc:byId(first.id) ~= nil)
+    check("the id counter never goes back", acc.seq == seq_before)
+    local fresh = acc:add("fresh", "blob")
+    check("a new account never reuses a freed id",
+          fresh ~= nil and fresh.id ~= doomed, fresh and fresh.id)
+    check("the removed id stays gone", acc:byId(doomed) == nil)
+
+    -- Removing the active one promotes a survivor rather than leaving none.
+    acc:setActive(acc:list()[1].id)
+    acc:remove(acc:list()[1].id)
+    check("removing the active account promotes another",
+          acc:active() ~= nil and acc:count() > 0)
+
+    os.remove(path)
+end
+
+-- The account dialog: the marker, the switching, and the delete mode. This is
+-- the list the KUAL submenu opens, so it has to hold up with no screen behind
+-- it as well as with one.
+do
+    local T = require("i18n").t
+    require("i18n").setLang("pt")
+    local a1 = app.accounts:add("Work", "blob-work")
+    local a2 = app.accounts:add("Personal", "blob-personal")
+    app.accounts:setActive(a1.id)
+
+    local function rowsOf(dlg)
+        local out = {}
+        for _, row in ipairs(dlg.buttons or {}) do
+            for _, btn in ipairs(row) do out[#out + 1] = btn end
+        end
+        return out
+    end
+
+    app:showAccounts()
+    local dlg = UIManager._window_stack[#UIManager._window_stack].widget
+    check("account dialog is on screen", dlg ~= nil and dlg.buttons ~= nil)
+    -- Byte length, not 2: the bullet is three bytes of UTF-8.
+    local MARK = "• "
+    local marked, marked_text = 0, nil
+    for _, btn in ipairs(rowsOf(dlg)) do
+        if btn.text:sub(1, #MARK) == MARK then
+            marked = marked + 1
+            marked_text = btn.text
+        end
+    end
+    check("exactly one account is marked", marked == 1, marked)
+    check("the marked one is the active one", marked_text == "• Work", marked_text)
+
+    -- Every account is listed, plus a way to add another.
+    local names = {}
+    for _, btn in ipairs(rowsOf(dlg)) do names[btn.text] = true end
+    check("the other account is listed", names["  Personal"] == true)
+    check("adding another account is offered", names[T("Add account (web)")] == true)
+    UIManager:close(dlg)
+
+    -- Switching moves the marker. switchAccount goes through showUsage, which
+    -- prompts for the PIN - the blobs here are fake, so only the bookkeeping is
+    -- asserted, not the unlock.
+    app.accounts:setActive(a2.id)
+    app:showAccounts()
+    dlg = UIManager._window_stack[#UIManager._window_stack].widget
+    local now_marked = nil
+    for _, btn in ipairs(rowsOf(dlg)) do
+        if btn.text:sub(1, #MARK) == MARK then now_marked = btn.text end
+    end
+    check("the marker follows the active account",
+          now_marked == "• Personal", now_marked)
+    UIManager:close(dlg)
+
+    -- Delete mode: same list, but destructive, so it must confirm first.
+    app:showAccounts({ mode = "remove" })
+    dlg = UIManager._window_stack[#UIManager._window_stack].widget
+    check("delete mode has a different title",
+          dlg.title == T("Remove which account?"), dlg.title)
+    local target = nil
+    for _, btn in ipairs(rowsOf(dlg)) do
+        if btn.text == "  Work" then target = btn end
+    end
+    check("delete mode lists the accounts", target ~= nil)
+    if target then
+        local before = app.accounts:count()
+        target.callback()
+        local top = UIManager._window_stack[#UIManager._window_stack].widget
+        check("deleting asks for confirmation first",
+              top ~= dlg and top.buttons ~= nil and #top.buttons[1] == 2)
+        check("nothing is removed until confirmed",
+              app.accounts:count() == before, app.accounts:count())
+        try("confirming removes the account", function()
+            top.buttons[1][2].callback()
+        end)
+        check("the account is gone", app.accounts:byId(a1.id) == nil)
+        check("the other account survived", app.accounts:byId(a2.id) ~= nil)
+    end
+
+    -- The settings dialog carries the in-app route to the same list.
+    app:showSettings()
+    local sdlg = UIManager._window_stack[#UIManager._window_stack].widget
+    local found = false
+    for _, btn in ipairs(rowsOf(sdlg)) do
+        if btn.text:sub(1, #T("Account")) == T("Account") then found = true end
+    end
+    check("settings dialog offers the account switcher", found)
+    UIManager:close(sdlg)
+
+    for _ = 1, app.accounts:count() do
+        app.accounts:remove(app.accounts:list()[1].id)
+    end
+end
+
+-- The KUAL submenu deep links. An unknown action must behave like a plain open:
+-- a stale shim after a partial upgrade would otherwise brick the launcher.
+do
+    app.accounts:add("Work", "blob-work")
+    app.accounts:add("Personal", "blob-personal")
+    app.session_token = "sk-ant-oat01-smoke"   -- start() unlocks before showing
+
+    for _, action in ipairs({ "accounts", "remove-account" }) do
+        try("start(" .. action .. ")", function() app:start(action) end)
+        local top = UIManager._window_stack[#UIManager._window_stack].widget
+        check(action .. " opens a dialog above the page",
+              top ~= app.cur_screen and top.buttons ~= nil)
+        UIManager:close(top)
+    end
+
+    try("start(nonsense) still opens the app", function() app:start("nonsense") end)
+    local top = UIManager._window_stack[#UIManager._window_stack].widget
+    check("an unknown action lands on the dashboard, not a dialog",
+          top == app.cur_screen)
+end
+
+-- The header names the active account once there is more than one, and that
+-- extra text eats the header's only slack - the same way an extra pill in the
+-- bottom bar is how a portrait layout starts overflowing off-screen.
+do
+    app.accounts:list()[1].name = "Conta bem longa demais"
+    app.accounts:setActive(app.accounts:list()[1].id)
+    for _, mode in ipairs({ "portrait", "landscape" }) do
+        app:openPage(1)
+        UIManager:_repaint()
+        local screen = app.cur_screen
+        for _, what in ipairs({ "refresh_btn", "close_btn" }) do
+            local d = screen[what] and screen[what].dimen
+            check("header " .. what .. " fits in " .. mode,
+                  d ~= nil and d.x >= 0 and d.x + d.w <= screen.width,
+                  d and (d.x .. "+" .. d.w .. " vs " .. screen.width))
+        end
+        if mode == "portrait" then app:cycleRotation() end
+    end
+    app:cycleRotation(); app:cycleRotation(); app:cycleRotation()
+    UIManager:_repaint()
+
+    for _ = 1, app.accounts:count() do
+        app.accounts:remove(app.accounts:list()[1].id)
+    end
+end
+
+-- Battery: text only. The icon path throws on the shipped runtime and the Nerd
+-- Font glyphs are pruned, so this must never be anything but a string.
+do
+    local Battery = require("battery")
+    local powerd = require("device"):getPowerDevice()
+    local real_cap, real_chg = powerd.getCapacity, powerd.isCharging
+
+    powerd.getCapacity = function() return 87 end
+    powerd.isCharging = function() return false end
+    check("battery renders a percentage", Battery.label() == "87%", Battery.label())
+    powerd.isCharging = function() return true end
+    check("charging adds the suffix", Battery.label() == "87%+", Battery.label())
+
+    -- The SDL build reports 0 for "this machine has no battery"; a headless
+    -- container claiming 0% on screen would be a lie.
+    powerd.getCapacity = function() return 0 end
+    check("no honest reading hides the indicator", Battery.label() == nil,
+          Battery.label())
+
+    -- An indicator is not worth crashing a dashboard over.
+    powerd.getCapacity = function() error("powerd exploded") end
+    check("a throwing powerd is swallowed", Battery.label() == nil)
+
+    -- ...and it reaches the header, and the repaint-suppression signature. A
+    -- level drawn but missing from the signature would freeze on screen.
+    powerd.getCapacity = function() return 87 end
+    powerd.isCharging = function() return false end
+    app:openPage(1)
+    UIManager:_repaint()
+    local screen = app.cur_screen
+    check("header text carries the battery",
+          screen:headerText("14:03"):find("87%%") ~= nil,
+          screen:headerText("14:03"))
+    local sig = screen:displaySig()
+    powerd.getCapacity = function() return 86 end
+    check("a battery change changes the display signature",
+          screen:displaySig() ~= sig)
+    powerd.getCapacity = function() return 87 end
+
+    -- Worst case for the header: a long account name AND the clock AND the
+    -- battery, in both orientations. The gap beside that text is slack, not
+    -- padding - it runs out.
+    local a1 = app.accounts:add("Conta bem longa", "blob-1")
+    app.accounts:add("Outra conta", "blob-2")
+    app.accounts:setActive(a1.id)
+    for _, mode in ipairs({ "portrait", "landscape" }) do
+        app:openPage(1)
+        UIManager:_repaint()
+        local s = app.cur_screen
+        check("header text has all three parts in " .. mode,
+              s:headerText("14:03"):find("·.*·") ~= nil, s:headerText("14:03"))
+        for _, what in ipairs({ "refresh_btn", "close_btn" }) do
+            local d = s[what] and s[what].dimen
+            check("header " .. what .. " fits with the battery in " .. mode,
+                  d ~= nil and d.x >= 0 and d.x + d.w <= s.width,
+                  d and (d.x .. "+" .. d.w .. " vs " .. s.width))
+        end
+        if mode == "portrait" then app:cycleRotation() end
+    end
+    app:cycleRotation(); app:cycleRotation(); app:cycleRotation()
+    for _ = 1, app.accounts:count() do
+        app.accounts:remove(app.accounts:list()[1].id)
+    end
+
+    powerd.getCapacity, powerd.isCharging = real_cap, real_chg
+end
+
+-- Ghosting: every app repaint is "ui", and KOReader's built-in full-refresh
+-- promotion only counts "partial" - so it never fired here and the panel kept
+-- its ghosts. The app promotes its own, and the counter must survive a page
+-- change (openPage builds a brand-new screen every time).
+do
+    app._paints = 0
+    local seen = {}
+    for _ = 1, 12 do seen[#seen + 1] = app:paintType(false) end
+    local fulls, first_full = 0, nil
+    for i, t in ipairs(seen) do
+        if t == "full" then
+            fulls = fulls + 1
+            first_full = first_full or i
+        end
+    end
+    check("a full refresh is promoted periodically", fulls == 2, fulls)
+    check("the first one lands on the 6th repaint", first_full == 6, first_full)
+
+    -- Animation frames pass a dirty region several times a minute. Counting
+    -- them would flash the whole panel for a 26x18 mascot.
+    app._paints = 0
+    local regional = "ui"
+    for _ = 1, 20 do
+        regional = app:paintType(true)
+        if regional ~= "ui" then break end
+    end
+    check("regional repaints are never promoted", regional == "ui", regional)
+    check("regional repaints do not advance the counter", app._paints == 0,
+          app._paints)
+
+    -- The counter lives on the controller, not the screen: a per-screen one
+    -- would reset on every swipe and never reach the promotion.
+    app._paints = 0
+    for _ = 1, 5 do app:paintType(false) end
+    app:openPage(2)
+    app:openPage(1)
+    check("navigating does not reset the counter", app._paints > 5, app._paints)
 end
 
 print(failures == 0 and "SMOKE OK" or ("SMOKE FAILED (" .. failures .. ")"))
