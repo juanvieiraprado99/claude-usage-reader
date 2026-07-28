@@ -3,11 +3,44 @@
 	{
 		"name": "Claude Usage",
 		"priority": 1,
-		"action": "./bin/claudeusage.sh",
-		"exitmenu": true,
-		"refresh": true,
-		"status": false,
-		"internal": "status Show Claude Code rate-limit usage"
+		"items": [
+		{
+			"name": "Abrir Claude Usage",
+			"priority": 1,
+			"action": "./bin/claudeusage.sh",
+			"exitmenu": true,
+			"refresh": true,
+			"status": false,
+			"internal": "status Show Claude Code rate-limit usage"
+		},
+		{
+			"name": "Adicionar conta",
+			"priority": 2,
+			"action": "./bin/claudeusage.sh add-account",
+			"exitmenu": true,
+			"refresh": true,
+			"status": false,
+			"internal": "status Add another Claude account (QR login)"
+		},
+		{
+			"name": "Ver contas",
+			"priority": 3,
+			"action": "./bin/claudeusage.sh accounts",
+			"exitmenu": true,
+			"refresh": true,
+			"status": false,
+			"internal": "status List the stored accounts and switch between them"
+		},
+		{
+			"name": "Excluir conta",
+			"priority": 4,
+			"action": "./bin/claudeusage.sh remove-account",
+			"exitmenu": true,
+			"refresh": true,
+			"status": false,
+			"internal": "status Delete a stored account and its token"
+		}
+		]
 	}
 	]
 }

@@ -74,10 +74,28 @@ end
 
 local UIManager = require("ui/uimanager")
 local Controller = require("controller")
+local Powersave = require("powersave")
 
 -- The UIManager loop does not stop on its own when the last widget closes, and
 -- several exit paths (login modal dismissed, error message tapped away) leave
--- an empty stack. Poll for that and quit so KUAL gets control back.
+-- an empty stack. A 1s poll used to catch that, but it meant waking the CPU
+-- every second for the app's entire lifetime - on top of preventScreenSaver
+-- already keeping the Kindle from ever suspending. Every stack removal goes
+-- through UIManager:close (openPage's own show happens synchronously right
+-- after, so a nextTick recheck won't fire mid-transition), so hook that
+-- instead and only fall back to polling - at a much longer interval - for any
+-- exotic removal path that bypasses close().
+local orig_close = UIManager.close
+UIManager.close = function(mgr, ...)
+    orig_close(mgr, ...)
+    if #mgr._window_stack == 0 then
+        mgr:nextTick(function()
+            if #mgr._window_stack == 0 then mgr:quit() end
+        end)
+    end
+end
+
+local WATCHDOG_FALLBACK = 15
 local function watchEmptyStack()
     if not UIManager._running then return end
     local stack = UIManager._window_stack
@@ -85,29 +103,28 @@ local function watchEmptyStack()
         UIManager:quit()
         return
     end
-    UIManager:scheduleIn(1, watchEmptyStack)
+    UIManager:scheduleIn(WATCHDOG_FALLBACK, watchEmptyStack)
 end
 
 -- Hold off the stock Kindle screensaver while the app is up - the same lipc
--- property KOReader's keepalive plugin sets. Both calls live here because
--- UIManager:run() returning is the one point every exit passes through (clean
--- quit, empty-stack watchdog, or the xpcall below); restoring it inside the
--- controller would leak the flag on a crash and leave the screensaver off
--- until the next reboot.
-local function preventScreensaver(enable)
-    if Device:isKindle() then
-        os.execute("lipc-set-prop com.lab126.powerd preventScreenSaver " .. (enable and 1 or 0))
-    end
-end
-
+-- property KOReader's keepalive plugin sets (app/powersave.lua). Whether to
+-- enable it at all is now a setting (default on, same behavior as before);
+-- but the disable-on-exit call stays unconditional and lives here regardless,
+-- because UIManager:run() returning is the one point every exit passes
+-- through (clean quit, empty-stack watchdog, or the xpcall below) - doing it
+-- from the controller would leak the flag on a crash and leave the
+-- screensaver off until the next reboot. Calling it with 0 when the setting
+-- was already off is a harmless no-op.
 local app = Controller.new()
-preventScreensaver(true)
-app:start()
-UIManager:scheduleIn(1, watchEmptyStack)
+Powersave.set(app.prevent_screensaver)
+-- Which KUAL menu entry launched us, if any (bin/claudeusage.sh exports it).
+-- An unknown value is treated as a plain open, never as an error.
+app:start(os.getenv("CU_ACTION"))
+UIManager:scheduleIn(WATCHDOG_FALLBACK, watchEmptyStack)
 
 local ok, err = xpcall(function() UIManager:run() end, debug.traceback)
 
-preventScreensaver(false)
+Powersave.set(false)
 Device:exit()
 
 if not ok then

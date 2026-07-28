@@ -50,7 +50,9 @@ function UsageScreen:setup()
     self._mascot_ref = nil
     self._mascot_bbox = nil
     self.anim_task = function() self:playRandomAnim() end
-    UIManager:nextTick(function() self:scheduleNextAnim() end)
+    if self.plugin.animations then
+        UIManager:nextTick(function() self:scheduleNextAnim() end)
+    end
 end
 
 function UsageScreen:onCloseWidget()
@@ -59,6 +61,25 @@ function UsageScreen:onCloseWidget()
 end
 
 -- data ----------------------------------------------------------------------
+-- Everything a repaint would actually show, as one string: comparing this
+-- against the last fetch's value lets doFetch skip the full-screen e-ink
+-- flash when a tick brought back exactly the same numbers.
+function UsageScreen:displaySig()
+    local h = self.data
+    local e5, e7 = Fmt.num(h, H5_RESET), Fmt.num(h, H7_RESET)
+    return table.concat({
+        tostring(self.err),
+        -- The whole header line, not just the clock: it also carries the
+        -- account and the battery level, and anything drawn but missing from
+        -- this signature would sit frozen until some other number moved.
+        self:headerText(self:updatedLabel(h ~= nil)),
+        h and h[H_STATUS] or "",
+        Fmt.pct(Fmt.num(h, H5_PCT)), Fmt.pct(Fmt.num(h, H7_PCT)),
+        Fmt.resetIn(e5), Fmt.resetIn(e7),
+        Fmt.resetDate(e5), Fmt.resetDate(e7),
+    }, "|")
+end
+
 function UsageScreen:doFetch()
     if self.closed then return end
     local h, err, auth = self.plugin:fetch()
@@ -69,8 +90,12 @@ function UsageScreen:doFetch()
     else
         self.err = err
     end
-    self:rebuild()
-    if auth then self.plugin:webLogin() end   -- token expired -> QR login modal
+    local sig = self:displaySig()
+    if sig ~= self._last_sig then
+        self._last_sig = sig
+        self:rebuild()
+    end
+    if auth then self.plugin:reauth() end   -- token expired -> QR login modal
     self:rescheduleRefresh()
 end
 
@@ -84,7 +109,18 @@ end
 function UsageScreen:scheduleNextAnim()
     if self.closed then return end
     UIManager:unschedule(self.anim_task)
+    if not self.plugin.animations or self.plugin:isIdle() then return end
     UIManager:scheduleIn(math.random(ANIM_MIN, ANIM_MAX), self.anim_task)
+end
+
+-- Called by the controller when the animations setting is flipped from the
+-- settings dialog while this screen is on screen.
+function UsageScreen:onAnimSettingChanged()
+    if self.plugin.animations then
+        self:scheduleNextAnim()
+    else
+        UIManager:unschedule(self.anim_task)
+    end
 end
 
 -- Pick an animation, biased by usage: cheerful when there is room, flustered
@@ -102,6 +138,14 @@ function UsageScreen:runAnim(name, on_done)
     local i = 0
     local function step()
         if self.closed then return end
+        -- The setting can flip mid-animation; the in-flight frame closure has
+        -- no task ref for onAnimSettingChanged to unschedule, so it checks
+        -- itself and settles back to resting instead of playing out.
+        if not self.plugin.animations then
+            self.cur_anim, self.cur_phase, self.cur_bob = nil, 0, 0
+            self:rebuild(true)
+            return
+        end
         i = i + 1
         if i > spec.frames then
             self.cur_anim, self.cur_phase, self.cur_bob = nil, 0, 0
@@ -119,10 +163,13 @@ end
 
 function UsageScreen:playRandomAnim()
     if self.closed then return end
+    -- The setting or idle state may have changed since this was scheduled.
+    if not self.plugin.animations or self.plugin:isIdle() then return end
     self:runAnim(self:pickAnim(), function() self:scheduleNextAnim() end)
 end
 
 function UsageScreen:triggerShy()
+    if not self.plugin.animations then return end   -- setting says no animations, full stop
     if self.cur_anim then return end   -- don't interrupt a running animation
     self:runAnim("shy", function() self:scheduleNextAnim() end)
 end
@@ -228,6 +275,10 @@ end
 -- flash the whole page.
 function UsageScreen:rebuild(anim_only)
     if self.closed then return end
+    -- A rebuild triggered by anything other than doFetch (rotation, language,
+    -- interval change) already repaints on its own; invalidate the cached sig
+    -- so the next tick's doFetch does not mistake stale state for a match.
+    if not anim_only then self._last_sig = nil end
 
     -- Capture the mascot rect BEFORE tearing the tree down; its position is
     -- stable across frames (the bob fits inside the margin).
@@ -285,7 +336,7 @@ function UsageScreen:rebuild(anim_only)
     end
 
     self[1] = self:_screenFrame(top, body, bottom)
-    UIManager:setDirty(self, "ui", dirty_region)
+    self:markDirty(dirty_region)
 end
 
 return UsageScreen

@@ -67,7 +67,7 @@ function ModelScreen:doFetch()
     self.err = err
     if not err then self.last_ok = os.time() end
     self:rebuild()
-    if auth then self.plugin:webLogin() end   -- token expired -> QR login modal
+    if auth then self.plugin:reauth() end   -- token expired -> QR login modal
     self:rescheduleRefresh()
 end
 
@@ -180,7 +180,7 @@ function ModelScreen:rebuild()
     }
 
     self[1] = self:_screenFrame(top, body, bottom)
-    UIManager:setDirty(self, "ui")
+    self:markDirty()
 end
 
 return ModelScreen

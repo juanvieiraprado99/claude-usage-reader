@@ -27,6 +27,7 @@ local Geom = require("ui/geometry")
 local UIManager = require("ui/uimanager")
 local Screen = require("device").screen
 local RotIcon = require("roticon")
+local Battery = require("battery")
 local Clawd = require("clawd")
 local Version = require("appversion")
 local Theme = require("theme")
@@ -37,6 +38,21 @@ local sb, face, C = Theme.sb, Theme.face, Theme.color
 -- Built per call, not once at load: a language change has to reach the labels.
 local function navLabels()
     return { T("Usage"), T("Models"), T("5h") }
+end
+
+-- How much of an account name the header will show.
+local ACCT_LABEL_MAX = 12
+
+-- Cut to at most `n` CHARACTERS, not bytes: account names are user-typed, and
+-- slicing a UTF-8 sequence in half renders as a tofu box on the device.
+local function truncate(s, n)
+    local out, count = {}, 0
+    for ch in s:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
+        count = count + 1
+        if count > n then break end
+        out[#out + 1] = ch
+    end
+    return table.concat(out)
 end
 
 local ScreenBase = InputContainer:extend{
@@ -89,6 +105,14 @@ function ScreenBase:rescheduleRefresh()
     if secs > 0 then UIManager:scheduleIn(secs, self.refresh_task) end
 end
 
+-- Every repaint in the app goes through here, so that one of them in every
+-- FULL_EVERY can be promoted to a flashing "full" refresh and clear the e-ink
+-- ghosting. `region` non-nil means a narrowed repaint (the mascot animation),
+-- which never counts - see controller:paintType().
+function ScreenBase:markDirty(region)
+    UIManager:setDirty(self, self.plugin:paintType(region ~= nil), region)
+end
+
 -- Free last frame's buffers and re-read the screen, which may have rotated.
 -- Returns the values every rebuild() needs: orientation, short side, inner width.
 function ScreenBase:beginRebuild()
@@ -116,6 +140,7 @@ end
 
 -- gestures ------------------------------------------------------------------
 function ScreenBase:onTap(a, b)
+    self.plugin:noteActivity()
     local ges = b or a
     local pos = ges and ges.pos
     local slop = sb(Theme.TAP_SLOP)
@@ -144,6 +169,7 @@ end
 -- KOReader reports swipes as compass points: west means the finger moved left,
 -- which should advance to the next page.
 function ScreenBase:onSwipe(a, b)
+    self.plugin:noteActivity()
     local ges = b or a
     local dir = ges and ges.direction
     local t = (dir == "west") and self.page_idx + 1
@@ -194,10 +220,36 @@ function ScreenBase.rotPill()
     }
 end
 
+-- Everything the header shows on the left: "Work · 14:03 · 87%". Each part is
+-- dropped when it has nothing to say - a single-account install gets exactly
+-- the header it had before, and the battery is absent wherever powerd has no
+-- honest number (the emulator).
+--
+-- Built here and not inline in buildHeader because the SCREENS' displaySig()
+-- needs the same string: displaySig exists to skip a repaint when nothing
+-- changed, so anything shown in the header but missing from the signature would
+-- sit frozen on screen until some other number happened to move.
+--
+-- The account name is truncated because the gap beside it is
+-- `max(GAP, lw - left - right)` - slack, not padding.
+function ScreenBase:headerText(updated)
+    local parts = {}
+    local accounts = self.plugin.accounts
+    if accounts and accounts:count() > 1 then
+        parts[#parts + 1] = truncate(accounts:label(accounts:active()),
+                                     ACCT_LABEL_MAX)
+    end
+    parts[#parts + 1] = updated
+    local batt = Battery.label()
+    if batt then parts[#parts + 1] = batt end
+    return table.concat(parts, " · ")
+end
+
 -- "updated 14:03" on the left, the auto-refresh and close pills on the right.
 function ScreenBase:buildHeader(updated)
     local lw = self.width - 2 * sb(Theme.MARGIN)
-    local left = TextWidget:new{ text = updated, face = face(14), bold = true,
+    local left = TextWidget:new{ text = self:headerText(updated),
+                                 face = face(14), bold = true,
                                  fgcolor = C.muted }
     local secs = self.plugin.refresh_interval
     local itxt = (secs == 0) and T("AUTO OFF") or string.format(T("AUTO %ds"), secs)
