@@ -20,10 +20,12 @@ local UsageScreen = require("usagescreen")
 local ModelScreen = require("modelsscreen")
 local TrendScreen = require("trendscreen")
 local History = require("history")
+local Accounts = require("accounts")
 local LoginModal = require("loginmodal")
 local TokenServer = require("tokenserver")
 local NetworkMgr = require("ui/network/manager")
 local ButtonDialog = require("ui/widget/buttondialog")
+local Powersave = require("powersave")
 local Screen = require("device").screen
 local Crypto = require("crypto")
 local ltn12 = require("ltn12")
@@ -38,6 +40,13 @@ local PROBE_MODEL = "claude-haiku-4-5-20251001"
 local CHANGE_COOLDOWN = 2              -- seconds between interval changes
 local LOGIN_PORT = 8099               -- LAN web receiver for the token
 local MAX_FAILS = 8                   -- wrong PIN tries before wiping the token
+-- One full-screen repaint in every FULL_EVERY is promoted to a flashing "full"
+-- refresh, which is what clears accumulated e-ink ghosting. 6 is KOReader's own
+-- default (DEFAULT_FULL_REFRESH_COUNT); at a 60s refresh interval that is a
+-- flash about every 6 minutes.
+local FULL_EVERY = 6
+local ACTIVE_MARK = "• "              -- marks the selected account in the list
+local IDLE_MARK   = "  "              -- keeps the other labels aligned with it
 
 -- Models probed (rotated one-per-cycle) on the Models screen.
 local MODELS = {
@@ -50,6 +59,8 @@ local PAGES_IMPL = 3                   -- navigable pages (dashboard, models, 5h
 local INTERVAL_CYCLE = { 0, 10, 30, 60, 300 }
 local BACKOFF_MAX = 300                -- ceiling when the network keeps failing
 local ROTA_PORTRAIT = Screen.DEVICE_ROTATED_UPRIGHT or 0
+local IDLE_AFTER = 300                 -- seconds without a tap/swipe before we call it idle
+local IDLE_MIN_REFRESH = 60            -- floor for the auto-refresh delay while idle
 
 -- Every popup here opens over a page, and the pages set `modal = true` so the
 -- framework routes gestures to them instead of the touch zones underneath.
@@ -90,6 +101,16 @@ function ClaudeUsage:init()
     -- "auto" (follow the environment), "pt" or "en".
     i18n.setLang(self.settings:readSetting("lang") or "auto")
     self.refresh_interval = self.settings:readSetting("refresh_interval") or 0
+    -- Default ON: the mascot's animations. Off saves the per-frame widget-tree
+    -- rebuild (see usagescreen.lua) - one more thing that keeps the CPU busy
+    -- while the screensaver is held off all day.
+    self.animations = self.settings:readSetting("animations") ~= false
+    -- Default ON: keeps the Kindle from ever suspending while the app is open
+    -- (see app.lua/powersave.lua). Off trades the always-visible dashboard for
+    -- letting the device actually sleep - unvalidated on real hardware, but
+    -- the escape hatch for anyone who'd rather have battery than uptime.
+    self.prevent_screensaver = self.settings:readSetting("prevent_screensaver") ~= false
+    self.last_activity = os.time()
     self.change_locked = false
     -- Exposed to the screens (page nav + model list).
     self.MODELS = MODELS
@@ -98,7 +119,11 @@ function ClaudeUsage:init()
     self._probe_idx = 0
     self._model_results = {}
     self._incidents = nil
-    self.history = History.new(DATA_DIR .. "/claudeusage_history.lua")
+    self._paints = 0        -- drives the periodic anti-ghosting full refresh
+    -- Accounts first: it migrates the old single-token settings layout, and the
+    -- history file to open depends on which account is active.
+    self.accounts = Accounts.new(self.settings, DATA_DIR)
+    self.history = History.new(self.accounts:histPath(self.accounts:active()))
     -- Which window the trend screen plots, "5h" or "7d". Lives here and not on
     -- the screen because openPage builds a fresh one on every navigation.
     self.trend_mode = "5h"
@@ -112,40 +137,86 @@ end
 
 -- App entry point, called by app.lua before UIManager:run(). Something must be
 -- on the stack before the loop starts, otherwise UIManager exits immediately.
-function ClaudeUsage:start()
+--
+-- `action` is the KUAL submenu deep link, arriving as the CU_ACTION environment
+-- variable (see bin/claudeusage.sh). An unrecognised value must behave exactly
+-- like no value at all: a stale shim left behind by a partial upgrade would
+-- otherwise brick the launch, and there is no console on a Kindle to see why.
+function ClaudeUsage:start(action)
+    if action == "add-account" then
+        self:webLogin()
+        return
+    end
     if not self:hasToken() then
         self:webLogin()
-    else
-        self:showUsage()
+        return
+    end
+    self:showUsage()
+    -- Over the dashboard, because a bare dialog on an empty stack leaves the
+    -- app with nothing to fall back to when it closes.
+    if action == "accounts" then
+        self:showAccounts()
+    elseif action == "remove-account" then
+        self:showAccounts({ mode = "remove" })
     end
 end
 
 function ClaudeUsage:hasToken()
-    return self.settings:readSetting("enc") ~= nil
+    return self.accounts:active() ~= nil
 end
 
 function ClaudeUsage:isUnlocked()
     return self.session_token ~= nil
 end
 
+-- Drop the ACTIVE account's record. Accounts:remove promotes whatever is left,
+-- so an install with two accounts logs out of one and keeps the other.
 function ClaudeUsage:logout()
-    self.settings:delSetting("enc")
-    self.settings:delSetting("pin_fail")
-    self.settings:flush()
+    local acct = self.accounts:active()
+    if acct then self.accounts:remove(acct.id) end
     self.session_token = nil
     notify(T("Token cleared."))
 end
 
--- Clear the token and drop straight back to the login modal, keeping the app
--- alive. Shared by the settings dialog and the bottom-bar button, so both do
--- exactly the same thing.
+-- Clear the token and drop back to whatever is left: another account if there
+-- is one, otherwise the login modal. Either way the app stays alive. Shared by
+-- the settings dialog and the bottom-bar button, so both do the same thing.
 function ClaudeUsage:doLogout()
     self:logout()
+    self:_adoptActiveAccount()
+    if self.accounts:active() then
+        self:showUsage()
+    else
+        self:webLogin()
+    end
+end
+
+-- Point the per-account state at whatever Accounts now calls active: its own
+-- history file, and none of the previous account's cached probe results. The
+-- token cache goes too, so the next showUsage() asks for that account's PIN.
+function ClaudeUsage:_adoptActiveAccount()
+    self.history:flush()   -- the outgoing account's samples, before the swap
+    self.history = History.new(self.accounts:histPath(self.accounts:active()))
+    self.session_token = nil
+    self._fail_streak = 0
+    self._probe_idx = 0
+    self._model_results = {}
+    self._incidents = nil
     if self.cur_screen then
         UIManager:close(self.cur_screen)
         self.cur_screen = nil
     end
-    self:webLogin()
+end
+
+-- Make `id` the active account and reopen the dashboard on it. showUsage() runs
+-- through withUnlocked, so the PIN prompt is the existing one - each account
+-- has its own PIN and its own failure counter.
+function ClaudeUsage:switchAccount(id)
+    local acct = self.accounts:byId(id)
+    if not acct or acct.id == self.accounts.active_id then return end
+    self.accounts:setActive(id)
+    self:_adoptActiveAccount()
+    self:showUsage()
 end
 
 -- Wrapped in a confirmation because the button sits one tap away on every
@@ -195,55 +266,115 @@ function ClaudeUsage:promptPin(title, on_pin)
     dialog:onShowKeyboard()
 end
 
--- Decrypt the stored token with a PIN; caches it in RAM for this session.
+-- Ask for a free-text name; same shape as promptPin, minus the numeric keypad.
+--
+-- Starts EMPTY and skipping is a real option: a stored name is a literal string,
+-- so pre-filling "Account 2" and letting it through would freeze that wording
+-- into the file and a language switch would never reach it. An empty name is
+-- kept as nil and rendered through T() on every draw instead.
+--
+-- Skip, not Cancel: by the time this dialog opens the token has already been
+-- validated over the network, and throwing it away would mean redoing the whole
+-- QR dance for what is a cosmetic field.
+function ClaudeUsage:promptName(on_name)
+    local dialog
+    dialog = InputDialog:new{
+        title = T("Name this account"),
+        input = "",
+        buttons = {{
+            { text = T("Skip"), id = "close",
+              callback = function()
+                  UIManager:close(dialog)
+                  on_name(nil)
+              end },
+            { text = "OK", is_enter_default = true,
+              callback = function()
+                  local name = dialog:getInputText()
+                  UIManager:close(dialog)
+                  on_name(name)
+              end },
+        }},
+    }
+    showOver(dialog)
+    dialog:onShowKeyboard()
+end
+
+-- Decrypt the ACTIVE account's token with its PIN; caches it in RAM for this
+-- session. The failure counter is per account, so wiping on MAX_FAILS takes out
+-- the account under attack and leaves the others alone.
 function ClaudeUsage:promptUnlock(on_ok)
+    local acct = self.accounts:active()
+    if not acct then return end
     self:promptPin(T("Locked — enter your PIN."), function(pin)
-        local blob = self.settings:readSetting("enc")
-        local tok = blob and Crypto.decrypt(blob, pin)
+        local tok = acct.enc and Crypto.decrypt(acct.enc, pin)
         if tok then
             self.session_token = tok
-            self.settings:saveSetting("pin_fail", 0)
-            self.settings:flush()
+            self.accounts:setPinFail(acct.id, 0)
             if on_ok then on_ok() end
         else
-            local fails = (self.settings:readSetting("pin_fail") or 0) + 1
+            local fails = (acct.pin_fail or 0) + 1
             if fails >= MAX_FAILS then
-                self:logout()
+                self.accounts:remove(acct.id)
+                self.session_token = nil
                 notify(T("Too many attempts — token wiped."))
+                self:_adoptActiveAccount()
+                if self.accounts:active() then
+                    self:showUsage()
+                else
+                    self:webLogin()
+                end
             else
-                self.settings:saveSetting("pin_fail", fails)
-                self.settings:flush()
+                self.accounts:setPinFail(acct.id, fails)
                 notify(T("Wrong PIN."))
             end
         end
     end)
 end
 
--- Encrypt a freshly-received token under a new PIN and store it.
-function ClaudeUsage:setPinAndStore(tok)
+-- Encrypt a freshly-received token under a new PIN and store it as a new
+-- account. `replace_id` instead updates that account's blob in place, keeping
+-- its name, its history and its position - that is the token-expiry re-login.
+function ClaudeUsage:addAccount(tok, replace_id)
     if not Crypto.available() then
         notify(T("Encryption unavailable — cannot store."))
         return
     end
-    self:promptPin(T("Create a 4-digit PIN"), function(pin)
-        if not pin or pin == "" then return end
-        local blob = Crypto.encrypt(tok, pin)
-        if not blob then
-            notify(T("Encryption unavailable — cannot store."))
-            return
-        end
-        self.settings:saveSetting("enc", blob)
-        self.settings:saveSetting("pin_fail", 0)
-        self.settings:delSetting("token")   -- drop any legacy plaintext
-        self.settings:flush()
-        self.session_token = tok
-        self:showUsage()   -- success -> go straight to the dashboard
-    end)
+    if not replace_id and self.accounts:count() >= Accounts.MAX_ACCOUNTS then
+        notify(T("Account limit reached."))
+        return
+    end
+    local function store(name)
+        self:promptPin(T("Create a 4-digit PIN"), function(pin)
+            if not pin or pin == "" then return end
+            local blob = Crypto.encrypt(tok, pin)
+            if not blob then
+                notify(T("Encryption unavailable — cannot store."))
+                return
+            end
+            if replace_id then
+                self.accounts:setEnc(replace_id, blob)
+            else
+                self.accounts:add(name, blob)
+                self:_adoptActiveAccount()   -- new account, its own history
+            end
+            self.session_token = tok
+            self:showUsage()   -- success -> go straight to the dashboard
+        end)
+    end
+    if replace_id then
+        store(nil)
+    else
+        self:promptName(store)
+    end
 end
 
 -- Show the QR login modal (LAN receiver + 5-min rotating URL/PIN/QR). Guards
 -- against stacking (also called automatically by UsageScreen on token expiry).
-function ClaudeUsage:webLogin()
+--
+-- `replace_id` re-authenticates an existing account instead of adding one: the
+-- expiry path must not turn a renewed token into a duplicate entry that no
+-- longer points at the account's own history.
+function ClaudeUsage:webLogin(replace_id)
     if self.login_open then return end
     -- NetworkMgr is a KOReader-app service; outside its usual host it may throw.
     -- Only block on a *definite* "not connected" answer, never on an error.
@@ -269,10 +400,18 @@ function ClaudeUsage:webLogin()
                 notify(T("Invalid token (rejected)."))
                 return
             end
-            self:setPinAndStore(tok)
+            self:addAccount(tok, replace_id)
         end,
         on_close = function() self.login_open = false end,
     })
+end
+
+-- Token expired (401/403): re-authenticate the ACTIVE account in place, so the
+-- renewed token lands on the same record and keeps its name and history. Called
+-- by all three pages, which is why it is a method and not the raw webLogin call.
+function ClaudeUsage:reauth()
+    local acct = self.accounts:active()
+    self:webLogin(acct and acct.id or nil)
 end
 
 -- One probe with an explicit token; true if accepted (not 401/403).
@@ -367,9 +506,35 @@ end
 function ClaudeUsage:nextRefreshDelay()
     local base = self.refresh_interval
     if base <= 0 then return 0 end                    -- auto-refresh off
-    if self._fail_streak == 0 then return base end
-    local delay = base * 2 ^ math.min(self._fail_streak, 6)
-    return math.min(delay, BACKOFF_MAX)
+    local delay = base
+    if self._fail_streak > 0 then
+        delay = math.min(base * 2 ^ math.min(self._fail_streak, 6), BACKOFF_MAX)
+    end
+    -- Nobody is looking: no point refreshing (and handshaking the radio) at
+    -- the user's chosen rate. The screensaver stays off regardless, so this is
+    -- the only lever idle time gives us.
+    if self:isIdle() then delay = math.max(delay, IDLE_MIN_REFRESH) end
+    return delay
+end
+
+-- Idle tracking --------------------------------------------------------------
+-- Taps and swipes report through screenbase.lua; nothing else counts (a
+-- physical Back key bypasses this, which is fine - it also closes the app).
+function ClaudeUsage:isIdle()
+    return os.time() - self.last_activity >= IDLE_AFTER
+end
+
+-- Only reschedule on the IDLE -> active edge: doing it on every tap would push
+-- the next fetch out indefinitely on a screen someone keeps prodding.
+function ClaudeUsage:noteActivity()
+    local was_idle = self:isIdle()
+    self.last_activity = os.time()
+    if was_idle and self.cur_screen then
+        self.cur_screen:rescheduleRefresh()
+        if self.animations and self.cur_screen.scheduleNextAnim then
+            self.cur_screen:scheduleNextAnim()
+        end
+    end
 end
 
 -- Probe one specific model; returns { code, ms, auth, reason }.
@@ -505,6 +670,33 @@ function ClaudeUsage:recordSample(v5, v7)
     if v5 or v7 then self.history:push(os.time(), v5, v7) end
 end
 
+-- The refresh mode the next repaint should use, and the app's answer to e-ink
+-- ghosting after a long session.
+--
+-- KOReader already promotes every Nth repaint to a flashing refresh
+-- (uimanager.lua), but it only counts repaints whose mode is "partial", and
+-- this app has never issued one - every repaint it makes is "ui". So the
+-- built-in mitigation never fired here, and hours of non-flashing updates is
+-- exactly how ghost text builds up. We count our own.
+--
+-- Three things this must keep doing:
+--   * The counter lives HERE and not on the screen: openPage() builds a fresh
+--     screen on every navigation, so a per-screen counter would reset on each
+--     swipe and never reach FULL_EVERY.
+--   * Regional repaints are excluded. The mascot animates several times a
+--     minute with a narrowed dirty region; counting those would flash the
+--     screen constantly, and promoting one would flash the whole panel for a
+--     26x18 sprite.
+--   * "full" and not "flashui": UIManager silently downgrades flashui to ui
+--     when avoid_flashing_ui is set, and this repaint exists precisely to
+--     flash. A regionless "full" also resets KOReader's own counter.
+function ClaudeUsage:paintType(regional)
+    if regional then return "ui" end
+    self._paints = (self._paints or 0) + 1
+    if self._paints % FULL_EVERY == 0 then return "full" end
+    return "ui"
+end
+
 -- Apply the app's rotation choice to the device (affects all pages).
 -- Standalone: there is no reader view to handle a SetRotationMode event, so we
 -- drive the Screen directly. The caller repaints; doing it here as well cost a
@@ -536,6 +728,27 @@ function ClaudeUsage:toggleLanguage()
     if self.cur_screen then self.cur_screen:rebuild() end
 end
 
+-- Toggle the mascot's animations on/off and persist the choice. Only the
+-- dashboard screen has any, hence the presence check before poking it.
+function ClaudeUsage:toggleAnimations()
+    self.animations = not self.animations
+    self.settings:saveSetting("animations", self.animations)
+    self.settings:flush()
+    if self.cur_screen and self.cur_screen.onAnimSettingChanged then
+        self.cur_screen:onAnimSettingChanged()
+    end
+end
+
+-- Toggle whether the app holds off the Kindle's screensaver, applied
+-- immediately (no restart needed) so the device can start sleeping the moment
+-- the user turns it off.
+function ClaudeUsage:togglePreventScreensaver()
+    self.prevent_screensaver = not self.prevent_screensaver
+    self.settings:saveSetting("prevent_screensaver", self.prevent_screensaver)
+    self.settings:flush()
+    Powersave.set(self.prevent_screensaver)
+end
+
 -- Advance the auto-refresh interval to the next value in the cycle.
 function ClaudeUsage:cycleInterval()
     local cur = self.refresh_interval
@@ -565,8 +778,98 @@ function ClaudeUsage:closeUI()
     UIManager:quit()
 end
 
+-- The account list, and the only place it is ever drawn. Three ways in: the
+-- KUAL "Ver contas" entry, the KUAL "Excluir conta" entry (mode = "remove") and
+-- the Account row in the settings dialog - so switching works whether the app
+-- is already open or not.
+--
+-- The active account carries a leading "• ", the others two spaces so the names
+-- stay in one column. That exact glyph is used because it already ships and
+-- renders in the interval row above; a star or a filled circle is not verified
+-- against the pruned NotoSans, and a missing glyph is a silent tofu box on
+-- e-ink. ButtonDialog and not ConfirmBox: icons throw on the shipped runtime.
+function ClaudeUsage:showAccounts(opts)
+    local remove_mode = opts and opts.mode == "remove"
+    local dlg
+    local function close_dlg() if dlg then UIManager:close(dlg) end end
+    local buttons = {}
+    for _, acct in ipairs(self.accounts:list()) do
+        local id = acct.id
+        local mark = (id == self.accounts.active_id) and ACTIVE_MARK or IDLE_MARK
+        table.insert(buttons, {{
+            text = mark .. self.accounts:label(acct),
+            callback = function()
+                close_dlg()
+                if remove_mode then
+                    self:confirmRemoveAccount(id)
+                else
+                    self:switchAccount(id)   -- tapping the active one is a no-op
+                end
+            end,
+        }})
+    end
+    if not remove_mode and self.accounts:count() < Accounts.MAX_ACCOUNTS then
+        table.insert(buttons, {{
+            text = T("Add account (web)"),
+            callback = function() close_dlg(); self:webLogin() end,
+        }})
+    end
+    table.insert(buttons, {{
+        text = T("Cancel"),
+        callback = function() close_dlg() end,
+    }})
+
+    dlg = ButtonDialog:new{
+        title = remove_mode and T("Remove which account?") or T("Accounts"),
+        title_align = "center",
+        buttons = buttons,
+    }
+    showOver(dlg)
+end
+
+-- Removing an account deletes its token for good, so it is confirmed the same
+-- way logging out is. The history file survives (see accounts.lua).
+function ClaudeUsage:confirmRemoveAccount(id)
+    local acct = self.accounts:byId(id)
+    if not acct then return end
+    local label = self.accounts:label(acct)
+    local dlg
+    dlg = ButtonDialog:new{
+        title = string.format(T("Remove %s? The token is deleted."), label),
+        title_align = "center",
+        buttons = {{
+            {
+                text = T("Cancel"),
+                callback = function() UIManager:close(dlg) end,
+            },
+            {
+                text = T("Remove"),
+                callback = function()
+                    UIManager:close(dlg)
+                    self:removeAccount(id)
+                end,
+            },
+        }},
+    }
+    showOver(dlg)
+end
+
+-- Drop the record. Removing the account currently on screen has to reopen the
+-- app on whatever is left, exactly like logging out of it.
+function ClaudeUsage:removeAccount(id)
+    local was_active = (id == self.accounts.active_id)
+    if not self.accounts:remove(id) then return end
+    if not was_active then return end   -- the screen still shows the right data
+    self:_adoptActiveAccount()
+    if self.accounts:active() then
+        self:showUsage()
+    else
+        self:webLogin()
+    end
+end
+
 -- Settings dialog, reached by tapping the version label: language, refresh
--- interval, login/logout, quit.
+-- interval, accounts, login/logout, quit.
 function ClaudeUsage:showSettings()
     local dlg
     local function close_dlg() if dlg then UIManager:close(dlg) end end
@@ -585,6 +888,19 @@ function ClaudeUsage:showSettings()
             end,
         })
     end
+    -- Which account is on screen, and the way to change it without leaving the
+    -- app. Same dialog the KUAL "Ver contas" entry opens. Hidden when nothing is
+    -- stored yet: there is nothing to switch between, and the row below already
+    -- offers the login.
+    local switch_row = nil
+    local active = self.accounts:active()
+    if active then
+        switch_row = {{
+            text = T("Account") .. ": " .. self.accounts:label(active),
+            callback = function() close_dlg(); self:showAccounts() end,
+        }}
+    end
+
     -- Standalone app: this dialog replaces the KOReader plugin menu, so the
     -- account actions that used to live there hang off it now.
     local account_row = {}
@@ -601,24 +917,35 @@ function ClaudeUsage:showSettings()
         })
     end
 
+    local rows = {
+        -- Rotation lives on the screen itself now (the arrow button).
+        {{
+            -- Shows the language in use; tapping switches to the other one.
+            text = T("Language") .. ": "
+                   .. (i18n.lang() == "pt" and "Português" or "English"),
+            callback = function() close_dlg(); self:toggleLanguage() end,
+        }},
+        {{
+            text = self.animations and T("Animations: on") or T("Animations: off"),
+            callback = function() close_dlg(); self:toggleAnimations() end,
+        }},
+        {{
+            text = self.prevent_screensaver and T("Keep awake: on") or T("Keep awake: off"),
+            callback = function() close_dlg(); self:togglePreventScreensaver() end,
+        }},
+        interval_row,
+    }
+    if switch_row then table.insert(rows, switch_row) end
+    table.insert(rows, account_row)
+    table.insert(rows, {{
+        text = T("Quit app"),
+        callback = function() close_dlg(); self:closeUI() end,
+    }})
+
     dlg = ButtonDialog:new{
         title = T("Settings"),
         title_align = "center",
-        buttons = {
-            -- Rotation lives on the screen itself now (the arrow button).
-            {{
-                -- Shows the language in use; tapping switches to the other one.
-                text = T("Language") .. ": "
-                       .. (i18n.lang() == "pt" and "Português" or "English"),
-                callback = function() close_dlg(); self:toggleLanguage() end,
-            }},
-            interval_row,
-            account_row,
-            {{
-                text = T("Quit app"),
-                callback = function() close_dlg(); self:closeUI() end,
-            }},
-        },
+        buttons = rows,
     }
     showOver(dlg)
 end

@@ -143,6 +143,15 @@ export LUA_PATH="$APP_DIR/?.lua;$RUNTIME_DIR/frontend/?.lua;$RUNTIME_DIR/?.lua;;
 export LUA_CPATH="$RUNTIME_DIR/libs/?.so;;"
 export CLAUDEUSAGE_DATA="$DATA_DIR"
 
+# Which KUAL submenu entry we came from: "add-account", "accounts",
+# "remove-account", or empty for a plain open. It travels as an ENV VAR and not
+# as argv because the KPM install ships shims that `exec kpm launch claudeusage`,
+# and kpm is not guaranteed to forward arguments - an exported variable survives
+# either path. An already-set value wins, which is exactly what those shims set.
+# app.lua ignores anything it does not recognise, so a stale shim left behind by
+# a partial upgrade still opens the app instead of bricking the launch.
+export CU_ACTION="${CU_ACTION:-$1}"
+
 # Keep the log bounded, and record both streams - a Lua traceback goes to stderr
 # but the KOReader logger writes to stdout.
 if [ -f "$LOG" ]; then

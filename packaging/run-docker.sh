@@ -65,7 +65,16 @@ export EMULATE_READER_H=1024
 export EMULATE_READER_DPI=212
 
 cd "$EMU"
-timeout 60 ./luajit /pkg/smoke.lua 2>&1 | grep -vE "^ffi\.(load|findlib)" | tail -40
+# Every failure first, then a tail for context. A plain `tail` used to be the
+# whole output, and once the check list outgrew that window a FAIL near the top
+# scrolled off and looked exactly like a pass. The pipeline also swallowed the
+# exit status (it ends in tail, which always succeeds), so the run reported
+# success no matter what - hence the explicit SMOKE OK gate, same as CI's.
+timeout 60 ./luajit /pkg/smoke.lua 2>&1 \
+    | grep -vE "^ffi\.(load|findlib)" >/tmp/smoke.log || true
+grep "^FAIL" /tmp/smoke.log || true
+tail -40 /tmp/smoke.log
+grep -q "SMOKE OK" /tmp/smoke.log
 INNER
 
 echo "==> running smoke test (pruned=$PRUNED)"

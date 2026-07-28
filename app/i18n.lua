@@ -78,9 +78,25 @@ local PT = {
     ["Settings"] = "Configurações",
     ["Off"] = "Off",
     ["Language"] = "Idioma",
+    ["Animations: on"] = "Animações: ativadas",
+    ["Animations: off"] = "Animações: desativadas",
+    ["Keep awake: on"] = "Manter acordado: ativado",
+    ["Keep awake: off"] = "Manter acordado: desativado",
     ["Login (web)"] = "Login (web)",
     ["Logout (clear token)"] = "Logout (apagar token)",
     ["Quit app"] = "Fechar app",
+
+    -- accounts
+    ["Account"] = "Conta",
+    ["Account %d"] = "Conta %d",
+    ["Accounts"] = "Contas",
+    ["Add account (web)"] = "Adicionar conta (web)",
+    ["Name this account"] = "Dê um nome a esta conta",
+    ["Skip"] = "Pular",
+    ["Account limit reached."] = "Limite de contas atingido.",
+    ["Remove which account?"] = "Remover qual conta?",
+    ["Remove %s? The token is deleted."] = "Remover %s? O token será apagado.",
+    ["Remove"] = "Remover",
 
     -- messages
     ["Token cleared."] = "Token apagado.",

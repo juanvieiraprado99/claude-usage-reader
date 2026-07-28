@@ -90,7 +90,7 @@ function TrendScreen:doFetch()
         self.err = err
     end
     self:rebuild()
-    if auth then self.plugin:webLogin() end
+    if auth then self.plugin:reauth() end
     self:rescheduleRefresh()
 end
 
@@ -323,7 +323,7 @@ function TrendScreen:rebuild()
 
 
     self[1] = self:_screenFrame(top, body, bottom)
-    UIManager:setDirty(self, "ui")
+    self:markDirty()
 end
 
 return TrendScreen

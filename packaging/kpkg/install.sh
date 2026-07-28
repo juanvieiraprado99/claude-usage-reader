@@ -20,8 +20,15 @@ if [ -d /mnt/us/extensions ]; then
     cp config.xml "$KUAL_DIR/config.xml"
     cp menu.json "$KUAL_DIR/menu.json"
     # The shim never hardcodes the install path - `kpm launch` resolves it.
+    #
+    # The submenu entries pass an action ("accounts", "add-account", ...) as $1.
+    # `kpm launch` takes no arguments of its own, so the shim converts it to an
+    # environment variable here: launch.sh execs the real launcher, and exec
+    # keeps the environment. One shim covers every menu entry.
     cat > "$KUAL_DIR/bin/claudeusage.sh" <<'EOF'
 #!/bin/sh
+CU_ACTION="$1"
+export CU_ACTION
 exec kpm launch claudeusage
 EOF
     chmod +x "$KUAL_DIR/bin/claudeusage.sh"
