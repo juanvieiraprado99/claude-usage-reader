@@ -100,10 +100,26 @@ import from `koreader/settings/` for users of the old plugin.
   (which self-inits — do NOT call `Device:init()`) → `Bidi.setup()` before any
   widget loads → `Controller.new():start()` → `UIManager:run()` →
   `Device:exit()`. `CanvasContext` is skipped on purpose (document engine).
-  Also runs a
-  1s watchdog that calls `UIManager:quit()` when the window stack empties
-  (the loop does not stop on its own), and wraps the loop in `xpcall` writing a
-  traceback to `crash.log`.
+  Empty-stack shutdown (the loop does not stop on its own) is event-driven: a
+  wrap around `UIManager:close()` quits on the next tick once the stack is
+  empty, with a 15s poll kept only as a fallback for any exotic removal path
+  that bypasses `close()` — a plain 1s poll used to run for the app's entire
+  lifetime, which is its own small battery cost on top of the screensaver
+  being held off. The loop is wrapped in `xpcall` writing a traceback to
+  `crash.log`.
+  `app/powersave.lua` holds the single `lipc-set-prop
+  com.lab126.powerd preventScreenSaver` call, guarded by `Device:isKindle()`.
+  Whether to hold off the screensaver at all is a controller setting
+  (`prevent_screensaver`, default **on** — the Kindle never suspends while the
+  app is open, which is the main reason the battery drains fast; toggleable
+  live from the settings dialog, applied immediately via
+  `Powersave.set()`). The disable-on-exit call in `app.lua` stays
+  unconditional regardless of the setting: it is the one point every exit path
+  (clean quit, watchdog, or the `xpcall` above) passes through, so putting it
+  in the controller would leak the flag on a crash and leave the screensaver
+  off until reboot. Not named `screensaver.lua`: the runtime already ships
+  `frontend/ui/screensaver.lua` (KOReader's own screensaver widget) — same
+  reason `appversion.lua` isn't called `version.lua`.
 - `extensions/claudeusage/config.xml` + `menu.json` + `bin/claudeusage.sh` —
   KUAL entry and
   launcher: framework stop/restore (`STOP_FRAMEWORK` toggle), `LUA_PATH`/
@@ -113,6 +129,17 @@ import from `koreader/settings/` for users of the old plugin.
   `menu.json`); a folder with only `menu.json` never shows up in the menu.
   In menu items, `status` is a command-or-`false` field, not a description —
   the description goes in `internal`.
+  `menu.json` is a **submenu**: one parent entry with a nested `items` array —
+  open / add account / list accounts / remove account. The last three pass an
+  action to the launcher, which re-exports it as **`CU_ACTION`** for
+  `app.lua` → `Controller:start(action)`. It travels as an env var, not argv,
+  because the KPM install goes through `kpm launch claudeusage`, which takes no
+  arguments of its own — an exported variable survives the `exec`, argv does
+  not. An action `start()` does not recognise **must** behave like a plain open:
+  a stale shim left behind by a partial upgrade would otherwise brick the
+  launch, and there is no console on a Kindle to see why. The submenu stays
+  **static** — the account names are drawn by the app's own dialog, because
+  `menu.json` lives in the install directory that `kpm upgrade` replaces.
   By default (`STOP_FRAMEWORK="no"`) the Amazon framework is left **running** —
   restarting it replays the whole Kindle boot animation on every exit. Instead
   the chrome is hidden (`pillow disableEnablePillow disable`) and the window
@@ -152,11 +179,15 @@ import from `koreader/settings/` for users of the old plugin.
   KPM specifics: `manifest_version: 2`, version as `[maj,min,patch]`,
   `supported_platforms` from `kindle|kindle5|kindlepw2|kindlehf`, artifact named
   `<id>_<ver>_<platforms>.kpkg` (tar.gz). `install.sh` drops a KUAL shim that
-  calls `kpm launch claudeusage` instead of hardcoding the install path, and
+  calls `kpm launch claudeusage` instead of hardcoding the install path — the
+  shim converts its `$1` into `CU_ACTION` first, because `kpm launch` takes no
+  arguments but `exec` keeps the environment, so one shim serves every submenu
+  entry — and
   `uninstall.sh` **keeps** the user data rather than deleting the token.
 - `app/controller.lua` — plain Lua class (`Controller.new()`), NOT a
   `WidgetContainer`. Opens settings/history, owns the pages, the refresh
-  interval and rotation. `start()` picks the first screen (login vs dashboard).
+  interval and rotation. `start(action)` picks the first screen (login vs
+  dashboard) and honours the KUAL submenu deep link (`CU_ACTION`).
   **`fetch()` contract:** `(headers, nil, nil)` on 200, `(nil, message, auth)`
   on ANYTHING else. Non-200 used to be returned as success, which rendered a
   rate-limited account as a silent `--%`.
@@ -172,11 +203,14 @@ import from `koreader/settings/` for users of the old plugin.
   (standalone: no reader view to receive a `SetRotationMode` event).
   `closeUI()` flushes history, closes the screen and
   calls `UIManager:quit()` — i.e. it QUITS THE APP; every exit path leads here.
-  `showSettings()` is where Login/Logout/interval/quit live; it is reached by
-  **tapping the version label** in the bottom-right corner. Logout also has a
-  visible **LOGOUT pill** in the bottom bar (`screenbase.lua`), shown only while
-  a token exists and confirmed through `confirmLogout()`; both routes go through
-  `doLogout()`.
+  `showSettings()` is where Account/Login/Logout/interval/quit live; it is
+  reached by **tapping the version label** in the bottom-right corner. Logout
+  also has a visible **LOGOUT pill** in the bottom bar (`screenbase.lua`), shown
+  only while a token exists and confirmed through `confirmLogout()`; both routes
+  go through `doLogout()`, which now falls back to the next remaining account
+  instead of always dropping to the login modal. On 401/403 the pages call
+  `reauth()`, **not** `webLogin()`: a renewed token must land back on the same
+  account record, or it becomes a duplicate entry pointing at no history.
 - **Popups must be marked modal, and must not draw icons.** Two traps, both of
   which silently broke every dialog in the app until the logout button forced
   them out:
@@ -196,6 +230,40 @@ import from `koreader/settings/` for users of the old plugin.
   the settings dialog had been unreachable.
 - `app/screenbase.lua` — the base every page extends. Owns the fullscreen frame,
   header, bottom bar, navigation, tap/swipe handling and refresh scheduling.
+  `headerText(updated)` composes the whole left side — `account · 14:03 · 87%`,
+  each part dropped when absent — and **`usagescreen:displaySig()` must use the
+  same function**: `displaySig` skips a repaint when nothing changed, so
+  anything drawn in the header but missing from the signature would sit frozen
+  on screen until some other number moved. The account name shows only when more
+  than one is stored, truncated to 12 characters — by codepoint, not byte, since
+  the names are user-typed and half a UTF-8 sequence renders as tofu. The gap
+  beside it is `max(GAP, lw - left - right)`, i.e. slack, so the smoke test
+  re-checks the header pills in both orientations with the worst case loaded.
+  `markDirty(region)` is the **only** way a page repaints — see the ghosting
+  note under `controller.lua`.
+- **E-ink ghosting: the app promotes its own full refresh.** KOReader already
+  has the standard mitigation (`uimanager.lua`, every Nth repaint becomes a
+  flashing `"full"`), but it **only counts repaints whose mode is `"partial"`**,
+  and this app has never issued one — every repaint it makes is `"ui"`. So the
+  built-in promotion never fired here, and hours of non-flashing updates is
+  exactly how ghost text builds up on the panel. `controller:paintType(regional)`
+  counts and promotes every `FULL_EVERY` (6, KOReader's own default). Three
+  things must stay true: the counter lives on the **controller**, because
+  `openPage()` builds a fresh screen on every navigation and a per-screen count
+  would reset on each swipe; **regional** repaints (the mascot's `anim_only`
+  frames, several a minute) are excluded and never promoted; and the mode is
+  `"full"`, not `"flashui"`, because UIManager silently downgrades `flashui` to
+  `ui` under `avoid_flashing_ui` and this repaint exists precisely to flash.
+- `app/battery.lua` — `Battery.label()` → `"87%"` / `"87%+"` charging / **nil**.
+  Reads `Device:getPowerDevice()`; no throttle of our own because BasePowerD
+  already caches the hardware read for 60s, which is what makes the Kindle path
+  (lipc → sysfs → a `gasgauge-info` popen) cheap enough to call from a rebuild.
+  Nil at 0: the SDL build reports 0 for "no battery", and a headless container
+  claiming `0%` on screen would be a lie. **Text only**, twice over —
+  `powerd:getBatterySymbol()` returns a Nerd Font glyph and `fonts/nerdfonts` is
+  pruned (tofu), and an `IconWidget` would *throw*, via
+  `ImageWidget:_loadfile` → `document/documentregistry`. Same trap as
+  `roticon.lua` and the ConfirmBox ban.
   Subclasses define `rebuild()` and `doFetch()`, may define `setup()` (extra
   state, before the first build) and `onExtraTap(pos, slop)` (page-specific
   targets). `beginRebuild()` frees the previous frame's buffers and returns
@@ -227,6 +295,10 @@ import from `koreader/settings/` for users of the old plugin.
   before the weekly series existed have no `weekly` key and must keep loading.
   Samples are only recorded while a screen is fetching, so the weekly series is
   sparse — it survives across sessions and fills in over days.
+  **One file per account** (`accounts.lua` owns the path). Not a nicety: the two
+  windows belong to different rate limits, so a shared series would feed
+  `burn.lua` a jump from one account's 20% to the other's 80% and report it as a
+  slope. The heatmap would be equally false.
 - `app/heatmap.lua` — the week as a 7×4 grid (a column per day, a row per 6h
   block), cell darkness = quota consumed in that block. Third state of page 3's
   tap toggle (`5h → 7d → heat`), reusing the same `weekly` series.
@@ -281,11 +353,33 @@ import from `koreader/settings/` for users of the old plugin.
   `sha256.lua`/`chacha20.lua` are LuaJIT (`bit`) implementations **self-tested vs
   RFC 8439 / FIPS vectors** (`.ok` flags); `Crypto.available()` gates storage —
   callers must **fail closed** (never store plaintext). Confidentiality-only (no
-  MAC). Storage: `settings "enc"` blob (no plaintext `token`), `settings "pin_fail"`
-  counter; `controller.lua` caches the decrypted token in RAM (`self.session_token`)
-  while the app is open and gates `showUsage` behind `promptUnlock`. HONEST LIMIT:
-  a 4-digit PIN is offline-brute-forceable by someone with the file — documented,
-  not overclaimed.
+  MAC). Storage: the blob and its `pin_fail` counter live **on the account
+  record** (`accounts.lua`), one PIN each — the top-level `settings "enc"` /
+  `"pin_fail"` keys are the pre-multi-account layout and are migrated away on
+  first load. `controller.lua` caches the decrypted token in RAM
+  (`self.session_token`) while the app is open and gates `showUsage` behind
+  `promptUnlock`. HONEST LIMIT: a 4-digit PIN is offline-brute-forceable by
+  someone with the file — documented, not overclaimed.
+- `app/accounts.lua` — the account list: N accounts (cap 5), each with its own
+  blob, its own PIN, its own `pin_fail` and its own history file. Stored as
+  `accounts` + `active_account` + `account_seq`. Three fields are deliberate:
+  `name` may be **nil** and renders through `T("Account %d")` at draw time (a
+  stored translated string would freeze the language — same trap as
+  `navLabels()`); `hist` is **stored, not derived**, so the migrated account
+  keeps the existing `claudeusage_history.lua`; `account_seq` only grows, so a
+  removed account's leftover history file can never be adopted by a later one.
+  `:remove()` deletes the record and **leaves the history file on disk** —
+  logging out must not silently destroy days of samples. Migration from the
+  single-token layout runs in `Accounts.new` and is one-way.
+  `crypto.lua` needed no change at all: it was already blob-agnostic.
+  Switching goes through `controller:switchAccount(id)` →
+  `_adoptActiveAccount()` (flush + reopen History, drop the cached token and
+  every per-account probe result) → `showUsage()`, which reuses the existing
+  `withUnlocked` PIN gate. The list is drawn in exactly one place,
+  `controller:showAccounts()`, reached from the KUAL submenu and from the
+  Account row in the settings dialog; the active row is marked with a leading
+  `"• "` — that glyph and not `★`/`●` because it already ships and renders in
+  the interval row, and an unverified glyph is a silent tofu box on e-ink.
 - `app/tokenserver.lua` — transient non-blocking LAN HTTP
   receiver (luasocket, polled via `UIManager:scheduleIn`). Serves a form (PIN
   pre-filled from `/?k=<PIN>`); a `POST /save` with the correct PIN delivers the
@@ -296,8 +390,8 @@ import from `koreader/settings/` for users of the old plugin.
   `http://<ip>:<port>/?k=<PIN>` + the URL + PIN. **Rotates the PIN/URL/QR every
   5 min**. `on_token` → save; `on_close` clears the controller's `login_open`
   guard. When
-  `fetch()` returns the auth-expired flag (HTTP 401/403), `usagescreen.doFetch`
-  calls `plugin:webLogin()` to pop this modal. There is NO bundled token (the old
+  `fetch()` returns the auth-expired flag (HTTP 401/403), the pages call
+  `plugin:reauth()` — `webLogin(active_id)` — to pop this modal. There is NO bundled token (the old
   `DEV_TOKEN` is gone); each user supplies their own `claude setup-token` value.
 - `app/clawd.lua` — Clawd mascot as Lua pixel-art (26x18 grid,
   **built procedurally** in `makeBase()` for exact geometry): wide solid body,
@@ -334,3 +428,14 @@ forced repaint of each. Re-verify these when bumping the runtime:
    back to the old behaviour (at the cost of the boot animation on exit).
 2. Real e-ink refresh and touch input — the smoke test uses SDL's dummy video
    driver, so nothing about painting to a real screen is proven.
+3. What actually happens when `prevent_screensaver` is turned off and the
+   Kindle suspends for real with the app in the foreground — never tested on
+   hardware. The setting is a straightforward on/off for the `lipc-set-prop`
+   call; whatever powerd does on suspend/resume around a running app is
+   between it and the device.
+4. Whether the periodic `"full"` refresh actually clears the ghosting, and
+   whether one in 6 repaints is the right rate. The smoke test proves the mode
+   string and the counter, nothing about the panel. `FULL_EVERY` in
+   `controller.lua` is the knob if it turns out to be too rare or too jarring.
+5. Whether the battery reading matches what the Kindle's own status bar says.
+   The smoke run stubs powerd, because the SDL build has no battery to read.
